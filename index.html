@@ -428,7 +428,7 @@ const DEFAULT_RULES = {
   'LG전자구독':'LG렌탈(공기청정기)','공기청정기':'LG렌탈(공기청정기)',
   '코웨이':'코웨이렌탈','쿠쿠렌탈':'쿠쿠렌탈료',
   // 통신
-  'LGU+':'LGU+','lgu+':'LGU+','ＬＧＵ＋':'LGU+','LGU+인터넷':'LGU+','ＬＧＵ＋인터넷':'LGU+','SKT':'SKT(핸드폰)',
+  'LGU+':'LGU+','lgu+':'LGU+','LGU+인터넷':'LGU+','SKT':'SKT(핸드폰)',
   // 교육프로그램
   '에듀베이션':'에듀베이션(통통통)','대교에듀베이션':'에듀베이션(통통통)',
   '키즈티티':'정규체육(키즈티티)','정규체육':'정규체육(키즈티티)',
@@ -517,11 +517,18 @@ function pct(a,b){if(!b)return '';return (a/b*100).toFixed(1)+'%'}
 function diffStr(curr,prev){if(!prev||!curr)return '';const d=curr-prev;const p=(d/prev*100).toFixed(1);return (d>=0?'▲':'▼')+' '+Math.abs(Math.round(d)).toLocaleString()+'원 ('+Math.abs(p)+'%)';}
 function diffClass(curr,prev){if(!prev||!curr)return '';return curr>prev?'up':'down'}
 
+function normalizeStr(s){
+  // 전각 문자를 반각으로 변환
+  return String(s).trim().replace(/[\uFF01-\uFF5E]/g, ch=>String.fromCharCode(ch.charCodeAt(0)-0xFEE0)).replace(/\u3000/g,' ');
+}
+
 function matchCategory(memo, sender){
-  const targets=[memo,sender].filter(Boolean).map(s=>String(s).trim());
+  const targets=[memo,sender].filter(Boolean).map(s=>normalizeStr(s));
+  const rules=DB.rules;
   for(const t of targets){
-    for(const[kw,cat]of Object.entries(DB.rules)){
-      if(t.includes(kw)||t.toLowerCase().includes(kw.toLowerCase()))return cat;
+    for(const[kw,cat]of Object.entries(rules)){
+      const normKw=normalizeStr(kw);
+      if(t.includes(normKw)||t.toLowerCase().includes(normKw.toLowerCase()))return cat;
     }
   }
   return null;
