@@ -754,35 +754,8 @@ async function saveAllMonths(){
     await saveDB(mk, monthData, outTxns);  // 원본 거래내역 같이 저장
   }
   hideLoading();
-
-  document.getElementById('btn-save-all').style.display='none';
-  document.getElementById('btn-go-monthly').style.display='inline-block';
-
-  const alertArea=document.getElementById('alert-area');
-  const rows=months.map(mk=>{
-    const [y,m]=mk.split('-');
-    const meta=DB.monthly[mk]._meta;
-    const uncats=(byMonthOut[mk]||[]).filter(t=>!t.cat&&t.out>0).length;
-    const profit=meta.totalIn-meta.totalOut;
-    return `<tr>
-      <td>${y}년 ${parseInt(m)}월</td>
-      <td class="amount" style="color:var(--green)">${fmt(meta.totalIn)}</td>
-      <td class="amount" style="color:var(--red)">${fmt(meta.totalOut)}</td>
-      <td class="amount" style="font-weight:700;color:${profit>=0?'var(--green)':'var(--red)'}">${fmt(Math.abs(profit))} ${profit>=0?'▲':'▼'}</td>
-      <td class="amount">${fmt(meta.lastBal||0)}</td>
-      <td>${uncats>0
-        ?`<button class="btn btn-ghost btn-sm" onclick="editMonthTxns('${mk}')" style="color:var(--red);border-color:var(--red)">✏️ ${uncats}건 수정</button>`
-        :'<span style="color:var(--green);font-size:12px">✅ 완료</span>'}</td>
-    </tr>`;
-  }).join('');
-
-  alertArea.innerHTML=`
-    <div class="alert alert-success">✅ ${months.length}개월치 저장 완료</div>
-    <table style="margin-bottom:12px">
-      <thead><tr><th>월</th><th>총수입</th><th>총지출</th><th>손익</th><th>월말잔액</th><th>미분류수정</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    <div id="edit-month-area"></div>`;
+  document.getElementById('upload-result').style.display='none';
+  refreshSavedMonths();
 }
 
 
@@ -970,29 +943,13 @@ async function saveMonth(){
   await saveDB(key, monthData, txns);  // 원본 거래내역 같이 저장
   hideLoading();
 
-  // 저장 완료 요약 표시
-  const profit=totalIn-totalOut;
-  document.getElementById('alert-area').innerHTML=`
-    <div class="alert alert-success">✅ ${year}년 ${month}월 저장 완료</div>
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
-      <div class="kpi" style="padding:14px"><div class="kpi-label">총 수입</div><div class="kpi-value" style="font-size:16px;color:var(--green)">${fmt(totalIn)}</div></div>
-      <div class="kpi" style="padding:14px"><div class="kpi-label">총 지출</div><div class="kpi-value" style="font-size:16px;color:var(--red)">${fmt(totalOut)}</div></div>
-      <div class="kpi" style="padding:14px"><div class="kpi-label">손익</div><div class="kpi-value" style="font-size:16px;color:${profit>=0?'var(--green)':'var(--red)'}">${fmt(Math.abs(profit))} ${profit>=0?'▲':'▼'}</div></div>
-      <div class="kpi" style="padding:14px"><div class="kpi-label">월말 잔액</div><div class="kpi-value" style="font-size:16px">${fmt(lastBal)}</div></div>
-    </div>`;
+  // 저장 버튼 숨기고 upload-result 닫기
+  document.getElementById('upload-result').style.display='none';
+  document.getElementById('btn-save-month').style.display='inline-block';
+  document.getElementById('btn-go-monthly').style.display='none';
 
-  // 저장 버튼 숨기고 월별현황 버튼 표시
-  document.getElementById('btn-save-month').style.display='none';
-  const goBtn=document.getElementById('btn-go-monthly');
-  goBtn.style.display='inline-block';
-  // 월별현황으로 이동 시 해당 월 설정
-  goBtn.setAttribute('data-year',year);
-  goBtn.setAttribute('data-month',month);
-  goBtn.onclick=function(){
-    document.getElementById('m-year').value=this.getAttribute('data-year');
-    document.getElementById('m-month').value=parseInt(this.getAttribute('data-month'));
-    goMonthly();
-  };
+  // 저장된 월별 내역 표 새로고침
+  refreshSavedMonths();
 }
 
 // ============================================================
@@ -1384,6 +1341,42 @@ function deleteCat(cat){
   renderCatList();
 }
 
+function refreshSavedMonths(){
+  const savedKeys=Object.keys(DB.monthly).sort().reverse();
+  const savedArea=document.getElementById('saved-months-area');
+  if(!savedArea)return;
+  if(!savedKeys.length){savedArea.innerHTML='';return;}
+
+  const rows=savedKeys.map(mk=>{
+    const[ky,km]=mk.split('-');
+    const meta=(DB.monthly[mk]&&DB.monthly[mk]._meta)||{};
+    const profit=(meta.totalIn||0)-(meta.totalOut||0);
+    return `<tr>
+      <td style="font-weight:600">${ky}년 ${parseInt(km)}월</td>
+      <td class="amount" style="color:var(--green)">${fmt(meta.totalIn||0)}</td>
+      <td class="amount" style="color:var(--red)">${fmt(meta.totalOut||0)}</td>
+      <td class="amount" style="font-weight:700;color:${profit>=0?'var(--green)':'var(--red)'}">${fmt(Math.abs(profit))} ${profit>=0?'▲':'▼'}</td>
+      <td class="amount">${fmt(meta.lastBal||0)}</td>
+      <td style="text-align:center;white-space:nowrap">
+        <button class="btn btn-ghost btn-sm" onclick="showTab('monthly',document.querySelector('[data-tab=\\'monthly\\']'));document.getElementById('m-year').value='${ky}';document.getElementById('m-month').value='${parseInt(km)}';renderMonthly()">📊 상세</button>
+        <button class="btn btn-ghost btn-sm" style="color:var(--gold);border-color:var(--gold);margin-left:4px" onclick="editSavedMonth('${mk}')">✏️ 수정</button>
+        <button class="btn btn-ghost btn-sm" style="color:var(--red);border-color:var(--red);margin-left:4px" onclick="deleteMonthData('${mk}')">🗑 삭제</button>
+      </td>
+    </tr>`;
+  }).join('');
+
+  savedArea.innerHTML=`
+    <div class="card" style="margin-top:16px">
+      <div class="card-title">저장된 월별 내역</div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>월</th><th>총수입</th><th>총지출</th><th>손익</th><th>월말잔액</th><th style="text-align:center">관리</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
 async function editSavedMonth(mk){
   showLoading('거래내역 불러오는 중...');
   try {
@@ -1510,39 +1503,8 @@ async function init(){
     document.getElementById('m-month').value=String(parseInt(m));
     document.getElementById('a-year').value=y;
 
-    // 업로드 탭에 저장된 내역 요약 표시
-    const rows=savedKeys.map(mk=>{
-      const[ky,km]=mk.split('-');
-      const meta=(DB.monthly[mk]&&DB.monthly[mk]._meta)||{};
-      const profit=(meta.totalIn||0)-(meta.totalOut||0);
-      return `<tr>
-        <td style="font-weight:600">${ky}년 ${parseInt(km)}월</td>
-        <td class="amount" style="color:var(--green)">${fmt(meta.totalIn||0)}</td>
-        <td class="amount" style="color:var(--red)">${fmt(meta.totalOut||0)}</td>
-        <td class="amount" style="font-weight:700;color:${profit>=0?'var(--green)':'var(--red)'}">${fmt(Math.abs(profit))} ${profit>=0?'▲':'▼'}</td>
-        <td class="amount">${fmt(meta.lastBal||0)}</td>
-        <td style="text-align:center;white-space:nowrap">
-          <button class="btn btn-ghost btn-sm" onclick="showTab('monthly',document.querySelector('[data-tab=\\'monthly\\']'));document.getElementById('m-year').value='${ky}';document.getElementById('m-month').value='${parseInt(km)}';renderMonthly()">📊 상세</button>
-          <button class="btn btn-ghost btn-sm" style="color:var(--gold);border-color:var(--gold);margin-left:4px" onclick="editSavedMonth('${mk}')">✏️ 수정</button>
-          <button class="btn btn-ghost btn-sm" style="color:var(--red);border-color:var(--red);margin-left:4px" onclick="deleteMonthData('${mk}')">🗑 삭제</button>
-        </td>
-      </tr>`;
-    }).join('');
-
-    const savedArea=document.getElementById('saved-months-area');
-    if(savedArea){
-      savedArea.innerHTML=`
-        <div class="card" style="margin-top:16px">
-          <div class="card-title">저장된 월별 내역 <span style="font-size:11px;color:var(--muted);font-weight:400">(월 클릭 시 상세 이동)</span></div>
-          <div style="overflow-x:auto">
-            <table>
-              <thead><tr><th>월</th><th>총수입</th><th>총지출</th><th>손익</th><th>월말잔액</th><th style="text-align:center">관리</th></tr></thead>
-              <tbody>${rows}</tbody>
-            </table>
-          </div>
-        </div>`;
-    }
-  }
+  // 저장된 월별 내역 표시
+  refreshSavedMonths();
   hideLoading();
 }
 
@@ -1581,6 +1543,7 @@ function showTab(name, btn){
 init();
 
 // HTML onclick/onchange에서 접근 가능하도록 window에 등록 (module scope 해결)
+window.refreshSavedMonths = refreshSavedMonths;
 window.deleteMonthData = deleteMonthData;
 window.editSavedMonth = editSavedMonth;
 window.handleFiles = handleFiles;
