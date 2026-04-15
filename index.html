@@ -1476,41 +1476,39 @@ function showTab(name, btn){
   if(name==='settings'){renderRules();renderCatList();}
 }
 
-// ============================================================
-// INIT
-// ============================================================
-function init(){
-  loadDB();
-
-  const curY=String(new Date().getFullYear());
-  const curM=String(new Date().getMonth()+1);
-
-  // 현재 연도/월 기본 설정
-  document.getElementById('upload-year').value=curY;
-  document.getElementById('upload-month').value=curM;
-  document.getElementById('a-year').value=curY;
-  document.getElementById('m-year').value=curY;
-  document.getElementById('m-month').value=curM;
-
-  // 저장된 데이터 있으면 가장 최근 월로 자동 설정
-  const savedKeys=Object.keys(DB.monthly).sort().reverse();
-  if(savedKeys.length){
-    const[y,m]=savedKeys[0].split('-');
-    document.getElementById('m-year').value=y;
-    document.getElementById('m-month').value=String(parseInt(m));
-    document.getElementById('a-year').value=y;
-  }
-}
-
 init();
+
+// HTML onclick/onchange에서 접근 가능하도록 window에 등록 (module scope 해결)
+window.handleFiles = handleFiles;
+window.handleFile = handleFile;
+window.showTab = showTab;
+window.saveMonth = saveMonth;
+window.saveAllMonths = saveAllMonths;
+window.saveEditedMonth = saveEditedMonth;
+window.goMonthly = goMonthly;
+window.navMonth = navMonth;
+window.updateCat = updateCat;
+window.updateMultiCat = updateMultiCat;
+window.editMonthTxns = editMonthTxns;
+window.toggleAllGroups = toggleAllGroups;
+window.addRule = addRule;
+window.deleteRule = deleteRule;
+window.addCategory = addCategory;
+window.deleteCat = deleteCat;
+window.exportData = exportData;
+window.importData = importData;
+window.clearAllData = clearAllData;
+window.renderMonthly = renderMonthly;
+window.renderAnnual = renderAnnual;
 
 // 브라우저 기본 파일 드래그 동작 전체 차단
 document.addEventListener('dragover', e=>e.preventDefault());
 document.addEventListener('drop', e=>e.preventDefault());
 
-// 드롭존 이벤트 - addEventListener 방식으로 직접 연결
+// 드롭존 이벤트
 (function(){
   const dz = document.getElementById('drop-zone');
+  if(!dz) return;
   dz.addEventListener('dragenter', e=>{e.preventDefault();dz.classList.add('drag-over');});
   dz.addEventListener('dragover',  e=>{e.preventDefault();dz.classList.add('drag-over');});
   dz.addEventListener('dragleave', e=>{e.preventDefault();dz.classList.remove('drag-over');});
