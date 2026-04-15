@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>알티오라 지출관리</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏫</text></svg>">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -172,8 +173,7 @@ hr{border:none;border-top:1px solid var(--border);margin:16px 0}
     </div>
   </div>
 
-  <div id="upload-result" style="display:none">
-    <div class="card">
+  <div id="upload-result" style="display:none">    <div class="card">
       <div class="card-title">
         자동 분류 결과
         <span id="uncat-badge" class="uncat-count" style="display:none"></span>
@@ -200,9 +200,8 @@ hr{border:none;border-top:1px solid var(--border);margin:16px 0}
       </div>
     </div>
   </div>
+  <div id="saved-months-area"></div>
 </div>
-
-<!-- ===================== MONTHLY TAB ===================== -->
 <div id="tab-monthly" class="tab-panel">
   <div class="period-bar">
     <span class="lbl">조회 기간</span>
@@ -369,9 +368,13 @@ const fbApp = initializeApp(firebaseConfig);
 const fsDB = getFirestore(fbApp);
 
 // Firestore 저장: monthly/{yearMonth} 문서에 저장
-async function saveMonthFS(key, data){
+async function saveMonthFS(key, data, txns){
   try {
     await setDoc(doc(fsDB,'monthly',key), data);
+    // 원본 거래내역도 저장 (수정용)
+    if(txns){
+      await setDoc(doc(fsDB,'transactions',key), {txns: JSON.stringify(txns)});
+    }
   } catch(e){ console.error('Firestore 저장 오류:', e); }
 }
 
@@ -487,10 +490,10 @@ async function loadDB(){
   hideLoading();
 }
 
-async function saveDB(key, data){
+async function saveDB(key, data, txns){
   if(key && data){
     DB.monthly[key] = data;
-    await saveMonthFS(key, data);
+    await saveMonthFS(key, data, txns);
   } else {
     // key 없이 호출 시 변경된 monthly 전체 저장 (rules 등 변경 시)
     // rules/categories는 별도 문서에 저장
@@ -748,7 +751,7 @@ async function saveAllMonths(){
     });
     inTxns.forEach(t=>{if(t.inp>0)totalIn+=t.inp;});
     const monthData=Object.assign({},summary,{_meta:{totalOut,totalIn,lastBal,savedAt:new Date().toISOString()}});
-    await saveDB(mk, monthData);
+    await saveDB(mk, monthData, outTxns);  // 원본 거래내역 같이 저장
   }
   hideLoading();
 
@@ -964,7 +967,7 @@ async function saveMonth(){
   inTxns.forEach(t=>{if(t.inp>0)totalIn+=t.inp;});
   const monthData=Object.assign({},summary,{_meta:{totalOut,totalIn,lastBal,savedAt:new Date().toISOString()}});
   showLoading('저장 중...');
-  await saveDB(key, monthData);
+  await saveDB(key, monthData, txns);  // 원본 거래내역 같이 저장
   hideLoading();
 
   // 저장 완료 요약 표시
@@ -1381,6 +1384,70 @@ function deleteCat(cat){
   renderCatList();
 }
 
+async function editSavedMonth(mk){
+  showLoading('거래내역 불러오는 중...');
+  try {
+    const snap = await getDoc(doc(fsDB,'transactions',mk));
+    hideLoading();
+    if(!snap.exists()){
+      alert('원본 거래내역이 없어요. 파일을 다시 업로드해서 저장해주세요.');
+      return;
+    }
+    const txns = JSON.parse(snap.data().txns||'[]');
+    const [y,m]=mk.split('-');
+    // 미분류 항목만 추출
+    const uncats=txns.filter(t=>(!t.cat||t.cat==='기타사용')&&t.out>0);
+    if(uncats.length===0){
+      alert('미분류 항목이 없어요. 모두 분류 완료됐습니다.');
+      return;
+    }
+    // 업로드 탭으로 이동 후 수정 화면 표시
+    showTab('upload', document.querySelector('[data-tab="upload"]'));
+    window._pendingTxns=txns;
+    window._pendingInTxns=[];
+    document.getElementById('upload-year').value=y;
+    document.getElementById('upload-month').value=String(parseInt(m));
+
+    const catOpts='<option value="">-- 미분류 --</option>'+allCats().map(c=>`<option value="${c}">${c}</option>`).join('');
+    const rows=uncats.map((t,i)=>`
+      <tr>
+        <td style="font-size:12px;color:var(--muted)">${t.date?t.date.slice(5):''}</td>
+        <td style="font-size:13px">${t.memo||'-'}</td>
+        <td><select onchange="updateCat(this,${txns.indexOf(t)})" style="width:100%;padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:#FFF3E0">
+          ${catOpts.replace(`value="${t.cat||''}"`,`value="${t.cat||''}" selected`)}
+        </select></td>
+        <td class="amount">${fmt(t.out)}</td>
+      </tr>`).join('');
+
+    document.getElementById('alert-area').innerHTML=`
+      <div class="alert alert-warn">✏️ ${y}년 ${parseInt(m)}월 미분류 ${uncats.length}건 수정</div>
+      <table>
+        <thead><tr><th>날짜</th><th>내역</th><th>카테고리</th><th>금액</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+    document.getElementById('result-table-wrap').style.display='none';
+    document.getElementById('result-summary').innerHTML='';
+    document.getElementById('uncat-badge').textContent=uncats.length+'건 미분류';
+    document.getElementById('uncat-badge').style.display='inline-block';
+    document.getElementById('btn-save-month').style.display='inline-block';
+    document.getElementById('btn-go-monthly').style.display='none';
+    document.getElementById('upload-result').style.display='block';
+  } catch(e){ hideLoading(); console.error(e); alert('오류: '+e.message); }
+}
+
+async function deleteMonthData(mk){
+  const[y,m]=mk.split('-');
+  if(!confirm(`${y}년 ${parseInt(m)}월 데이터를 삭제할까요?`))return;
+  showLoading('삭제 중...');
+  try{
+    await deleteDoc(doc(fsDB,'monthly',mk));
+    delete DB.monthly[mk];
+    hideLoading();
+    // 목록 새로고침
+    location.reload();
+  }catch(e){hideLoading();alert('삭제 오류: '+e.message);}
+}
+
 async function clearAllData(){
   showLoading('초기화 중...');
   try {
@@ -1424,6 +1491,7 @@ function importData(file){
 // INIT
 // ============================================================
 async function init(){
+  showLoading('데이터 불러오는 중...');
   await loadDB();
 
   const curY=String(new Date().getFullYear());
@@ -1441,7 +1509,41 @@ async function init(){
     document.getElementById('m-year').value=y;
     document.getElementById('m-month').value=String(parseInt(m));
     document.getElementById('a-year').value=y;
+
+    // 업로드 탭에 저장된 내역 요약 표시
+    const rows=savedKeys.map(mk=>{
+      const[ky,km]=mk.split('-');
+      const meta=(DB.monthly[mk]&&DB.monthly[mk]._meta)||{};
+      const profit=(meta.totalIn||0)-(meta.totalOut||0);
+      return `<tr>
+        <td style="font-weight:600">${ky}년 ${parseInt(km)}월</td>
+        <td class="amount" style="color:var(--green)">${fmt(meta.totalIn||0)}</td>
+        <td class="amount" style="color:var(--red)">${fmt(meta.totalOut||0)}</td>
+        <td class="amount" style="font-weight:700;color:${profit>=0?'var(--green)':'var(--red)'}">${fmt(Math.abs(profit))} ${profit>=0?'▲':'▼'}</td>
+        <td class="amount">${fmt(meta.lastBal||0)}</td>
+        <td style="text-align:center;white-space:nowrap">
+          <button class="btn btn-ghost btn-sm" onclick="showTab('monthly',document.querySelector('[data-tab=\\'monthly\\']'));document.getElementById('m-year').value='${ky}';document.getElementById('m-month').value='${parseInt(km)}';renderMonthly()">📊 상세</button>
+          <button class="btn btn-ghost btn-sm" style="color:var(--gold);border-color:var(--gold);margin-left:4px" onclick="editSavedMonth('${mk}')">✏️ 수정</button>
+          <button class="btn btn-ghost btn-sm" style="color:var(--red);border-color:var(--red);margin-left:4px" onclick="deleteMonthData('${mk}')">🗑 삭제</button>
+        </td>
+      </tr>`;
+    }).join('');
+
+    const savedArea=document.getElementById('saved-months-area');
+    if(savedArea){
+      savedArea.innerHTML=`
+        <div class="card" style="margin-top:16px">
+          <div class="card-title">저장된 월별 내역 <span style="font-size:11px;color:var(--muted);font-weight:400">(월 클릭 시 상세 이동)</span></div>
+          <div style="overflow-x:auto">
+            <table>
+              <thead><tr><th>월</th><th>총수입</th><th>총지출</th><th>손익</th><th>월말잔액</th><th style="text-align:center">관리</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        </div>`;
+    }
   }
+  hideLoading();
 }
 
 init();
@@ -1479,6 +1581,8 @@ function showTab(name, btn){
 init();
 
 // HTML onclick/onchange에서 접근 가능하도록 window에 등록 (module scope 해결)
+window.deleteMonthData = deleteMonthData;
+window.editSavedMonth = editSavedMonth;
 window.handleFiles = handleFiles;
 window.handleFile = handleFile;
 window.showTab = showTab;
