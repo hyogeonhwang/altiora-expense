@@ -1413,7 +1413,10 @@ async function editSavedMonth(mk){
       </tr>`).join('');
 
     document.getElementById('alert-area').innerHTML=`
-      <div class="alert alert-warn">✏️ ${y}년 ${parseInt(m)}월 미분류 ${uncats.length}건 수정</div>
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('upload-result').style.display='none';refreshSavedMonths()">← 목록으로</button>
+        <span style="font-size:14px;font-weight:700">✏️ ${y}년 ${parseInt(m)}월 미분류 ${uncats.length}건 수정</span>
+      </div>
       <table>
         <thead><tr><th>날짜</th><th>내역</th><th>카테고리</th><th>금액</th></tr></thead>
         <tbody>${rows}</tbody>
