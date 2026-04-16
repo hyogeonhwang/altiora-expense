@@ -450,7 +450,7 @@ const GROUPS = {
   '카드대금': ['카드대금'],
   '원복': ['원복','원복비'],
   '대출원리금': ['대출원리금','대출이자'],
-  '기타지출': ['현수막제작비','기타사용'],
+  '기타지출': ['기타사용'],
   '계좌간대체': ['계좌간대체'],
   '가수금': ['가수금','가수금입금'],
 };
@@ -498,7 +498,7 @@ const DEFAULT_RULES = {
   '대출이자':'대출이자','원리금':'대출이자','원리금상환':'대출이자','대출원리금':'대출이자',
   '원복':'원복','스마트아이':'원복비','스탠바이미':'원복비',
   '페타무스필통':'원복비','페타무스가방':'원복비','페타무스책상':'원복비',
-  '현수막':'현수막제작비',
+  '현수막':'기타사용',
   '크몽':'기타사용','구글':'기타사용','마케팅':'기타사용',
   '생일선물':'기타사용','액자':'기타사용','pc수리':'기타사용','조명':'기타사용','졸업식':'기타사용',
   // 계좌간대체 (와이제이투 등 계좌간 이체 - 실지출 아님)
@@ -957,7 +957,9 @@ function renderUploadResult(txns, monthKey, inTxns){
   document.getElementById('result-table-wrap').style.display='block';
   const tbody=document.getElementById('result-tbody');
   tbody.innerHTML='';
-  const catOpts='<option value="">-- 미분류 --</option>'+allCats().map(c=>`<option value="${c}">${c}</option>`).join('');
+  // 구분명(그룹) 기준 드롭다운
+  const grpOpts='<option value="">-- 미분류 --</option>'+
+    Object.keys(DB.groups).filter(g=>g!=='계좌간대체').map(g=>`<option value="${g}">${g}</option>`).join('');
 
   txns.forEach((t,i)=>{
     const tr=document.createElement('tr');
@@ -968,6 +970,9 @@ function renderUploadResult(txns, monthKey, inTxns){
       ?`<span class="badge badge-skip">입금</span>`
       :t.cat?`<span class="badge badge-auto">자동</span>`
       :`<span class="badge badge-manual">수동</span>`;
+    // 현재 카테고리의 그룹 찾기
+    const curGroup=groupOf(t.cat)||'';
+    const selOpts=grpOpts.replace(`value="${curGroup}"`,`value="${curGroup}" selected`);
     tr.innerHTML=`
       <td>${badge}</td>
       <td style="color:var(--muted);font-size:12px">${t.date.slice(5)}</td>
@@ -977,8 +982,8 @@ function renderUploadResult(txns, monthKey, inTxns){
       </td>
       <td>${isIncome
         ?`<span style="color:var(--green);font-size:12px">입금</span>`
-        :`<select onchange="updateCat(this,${i})" style="width:100%;padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:${isUncat?'#FFF3E0':'#fff'}">
-            ${catOpts.replace(`value="${t.cat||''}"`,`value="${t.cat||''}" selected`)}
+        :`<select onchange="updateCatByGroup(this,${i})" style="width:100%;padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:${isUncat?'#FFF3E0':'#fff'}">
+            ${selOpts}
           </select>`}
       </td>
       <td class="amount" style="color:${isIncome?'var(--green)':isUncat?'var(--red)':'var(--text)'}">
@@ -991,22 +996,55 @@ function renderUploadResult(txns, monthKey, inTxns){
 }
 
 function updateCat(sel,idx){
-  window._pendingTxns[idx].cat=sel.value||null;
-  sel.style.background=sel.value?'#fff':'#FFF3E0';
+  const val=sel.value||null;
+  window._pendingTxns[idx].cat=val;
+  if(val){
+    // 분류됐으면 행 숨김
+    const row=sel.closest('tr');
+    if(row) row.style.display='none';
+    const remaining=window._pendingTxns.filter(t=>!t.cat&&t.out>0).length;
+    const badge=document.getElementById('uncat-badge');
+    if(badge) badge.textContent=remaining+'건 미분류';
+  } else {
+    sel.style.background='#FFF3E0';
+  }
 }
+
+function updateCatByGroup(sel,idx){
+  const groupName=sel.value;
+  if(!groupName){
+    window._pendingTxns[idx].cat=null;
+    sel.style.background='#FFF3E0';
+    return;
+  }
+  // 그룹의 첫 번째 카테고리를 저장
+  const cats=DB.groups[groupName]||[];
+  window._pendingTxns[idx].cat=cats[0]||groupName;
+  // 분류됐으면 해당 행 즉시 숨김
+  const row=sel.closest('tr');
+  if(row) row.style.display='none';
+  // 미분류 카운트 업데이트
+  const remaining=window._pendingTxns.filter(t=>!t.cat&&t.out>0).length;
+  const badge=document.getElementById('uncat-badge');
+  if(badge) badge.textContent=remaining+'건 미분류';
+  const header=document.querySelector('[data-uncat-count]');
+  if(header) header.textContent=`✏️ 미분류 ${remaining}건 수정`;
+}
+window.updateCatByGroup=updateCatByGroup;
 
 function editMonthTxns(mk){
   const txns=window._multiMonthTxns[mk]||[];
   const uncats=txns.filter(t=>!t.cat&&t.out>0);
   const [y,m]=mk.split('-');
-  const catOpts='<option value="">-- 미분류 --</option>'+allCats().map(c=>`<option value="${c}">${c}</option>`).join('');
+  const grpOpts2='<option value="">-- 미분류 --</option>'+
+    Object.keys(DB.groups).filter(g=>g!=='계좌간대체').map(g=>`<option value="${g}">${g}</option>`).join('');
 
   const rows=uncats.map((t,i)=>`
     <tr>
       <td style="font-size:12px;color:var(--muted)">${t.date.slice(5)}</td>
       <td style="font-size:13px">${t.memo||'-'}</td>
       <td><select onchange="updateMultiCat('${mk}',${txns.indexOf(t)},this.value)" style="width:100%;padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:#FFF3E0">
-        ${catOpts}
+        ${grpOpts2}
       </select></td>
       <td class="amount">${fmt(t.out)}</td>
     </tr>`).join('');
@@ -1024,9 +1062,10 @@ function editMonthTxns(mk){
     </div>`;
 }
 
-function updateMultiCat(mk,idx,val){
-  if(window._multiMonthTxns[mk])
-    window._multiMonthTxns[mk][idx].cat=val||null;
+function updateMultiCat(mk,idx,groupName){
+  if(!window._multiMonthTxns[mk])return;
+  const cats=DB.groups[groupName]||[];
+  window._multiMonthTxns[mk][idx].cat=groupName?cats[0]||groupName:null;
 }
 
 async function saveEditedMonth(mk){
@@ -1068,6 +1107,8 @@ async function saveMonth(){
 
   const summary={};
   let totalOut=0, totalIn=0, outLastBal=0, inLastBal=0;
+  // 수정 후 저장 시 inTxns가 비어있으면 기존 저장된 입금계좌 데이터 보존
+  const prevMetaForSave=(DB.monthly[key]&&DB.monthly[key]._meta)||{};
   txns.forEach(t=>{
     if(t.out>0){
       const cat=t.cat||'기타사용';
@@ -1089,6 +1130,12 @@ async function saveMonth(){
     }
     if(t.bal)inLastBal=t.bal;
   });
+  // inTxns가 비어있으면(수정 후 저장) 기존 저장된 입금계좌 값 보존
+  if(inTxns.length===0){
+    inLastBal=prevMetaForSave.inLastBal||0;
+    totalIn=prevMetaForSave.totalIn||0;
+    gasugumIn=prevMetaForSave.gasugumIn||0;
+  }
   const lastBal=outLastBal+inLastBal;
   const monthData=Object.assign({},summary,{_meta:{totalOut,totalIn,gasugumIn,lastBal,outLastBal,inLastBal,savedAt:new Date().toISOString()}});
   showLoading('저장 중...');
@@ -1130,8 +1177,13 @@ function renderMonthly(){
   }
 
   const meta=data._meta||{};
-  // 현금흐름 총지출: 계좌간대체 제외 전체 (가수금 포함)
-  const totalOut=allCats().filter(c=>c!=='계좌간대체'&&c!=='가수금입금').reduce((s,c)=>s+(data[c]||0),0);
+  // totalOut: 계좌간대체/가수금입금 제외, 현수막제작비→기타사용 합산
+  const rawData=Object.assign({},data);
+  if(rawData['현수막제작비']){
+    rawData['기타사용']=(rawData['기타사용']||0)+rawData['현수막제작비'];
+    delete rawData['현수막제작비'];
+  }
+  const totalOut=allCats().filter(c=>c!=='계좌간대체'&&c!=='가수금입금').reduce((s,c)=>s+(rawData[c]||0),0);
   // 가수금 입출금
   const gasugumIn=meta.gasugumIn||data['가수금입금']||0; // meta에서 우선 읽기
   const gasugeum=data['가수금']||0;
@@ -1302,7 +1354,7 @@ function renderMonthly(){
   let groupIdx=0;
   allCats().forEach(cat=>{
     const g=groupOf(cat);
-    const val=data[cat]||0;
+    const val=(rawData[cat])||0;
     const prevVal=(prev&&prev[cat])||0;
     if(!val&&!prevVal)return;
     if(g!==lastGroup){
@@ -1415,26 +1467,36 @@ function renderModal(){
   }
   tbody.innerHTML=filtered.map(t=>{
     const realIdx=_modalTxns.indexOf(t);
-    const curGroup=groupOf(t.cat)||t.cat;
-    const opts=Object.keys(DB.groups).map(g=>`<option value="${g}" ${g===curGroup?'selected':''}>${g}</option>`).join('');
+    const curGroup=groupOf(t.cat||(t.out>0?'기타사용':null))||'기타지출';
+    const groupOpts=Object.keys(DB.groups)
+      .filter(g=>g!=='계좌간대체')
+      .map(g=>`<option value="${g}" ${g===curGroup?'selected':''}>${g}</option>`).join('');
     return `<tr style="border-bottom:1px solid var(--border)">
       <td style="padding:8px;color:var(--muted);font-size:12px">${t.date?t.date.slice(5):''}</td>
       <td style="padding:8px;font-size:13px">${t.memo||'-'}</td>
       <td style="padding:8px;text-align:right;font-size:13px">${fmt(t.out)}</td>
       <td style="padding:8px">
-        <select onchange="changeModalCat(${realIdx},this.value)" style="width:100%;padding:4px 6px;font-size:12px;border:1px solid var(--border);border-radius:6px">
-          ${opts}
+        <select onchange="changeModalGroup(${realIdx},this.value)" style="width:100%;padding:4px 6px;font-size:12px;border:1px solid var(--border);border-radius:6px">
+          ${groupOpts}
         </select>
       </td>
     </tr>`;
   }).join('');
 }
 
-function changeModalCat(idx, groupName){
-  // 그룹의 첫 번째 카테고리를 대표값으로 사용
-  const cats=DB.groups[groupName];
-  const cat=cats&&cats.length?cats[0]:groupName;
-  _modalTxns[idx].cat=cat;
+function changeModalGroup(idx, groupName){
+  const cats=DB.groups[groupName]||[];
+  // 그룹의 첫 번째 카테고리로 저장 (항상 실행)
+  _modalTxns[idx].cat=cats[0]||groupName;
+  // 두 번째 드롭다운 있으면 업데이트
+  const catSel=document.getElementById(`cat-${idx}`);
+  if(catSel){
+    catSel.innerHTML=cats.map(c=>`<option value="${c}">${c}</option>`).join('');
+  }
+}
+
+function changeModalCat(idx, catName){
+  _modalTxns[idx].cat=catName;
 }
 
 function closeModal(){
@@ -1473,6 +1535,7 @@ async function saveModalChanges(){
     hideLoading();
     closeModal();
     renderMonthly();
+    if(typeof renderAnnual==='function') renderAnnual();
     alert('✅ 저장 완료');
   } catch(e){ hideLoading(); alert('오류: '+e.message); }
 }
@@ -1796,16 +1859,19 @@ async function editSavedMonth(mk){
     document.getElementById('upload-year').value=y;
     document.getElementById('upload-month').value=String(parseInt(m));
 
-    const catOpts='<option value="">-- 미분류 --</option>'+allCats().map(c=>`<option value="${c}">${c}</option>`).join('');
-    const rows=uncats.map((t,i)=>`
-      <tr>
+    const grpOptsEdit='<option value="">-- 미분류 --</option>'+
+      Object.keys(DB.groups).filter(g=>g!=='계좌간대체').map(g=>`<option value="${g}">${g}</option>`).join('');
+    const rows=uncats.map((t,i)=>{
+      const curGrp=groupOf(t.cat)||'';
+      const selOpts=grpOptsEdit.replace(`value="${curGrp}"`,`value="${curGrp}" selected`);
+      return `<tr>
         <td style="font-size:12px;color:var(--muted)">${t.date?t.date.slice(5):''}</td>
         <td style="font-size:13px">${t.memo||'-'}</td>
-        <td><select onchange="updateCat(this,${txns.indexOf(t)})" style="width:100%;padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:#FFF3E0">
-          ${catOpts.replace(`value="${t.cat||''}"`,`value="${t.cat||''}" selected`)}
+        <td><select onchange="updateCatByGroup(this,${txns.indexOf(t)})" style="width:100%;padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:#FFF3E0">
+          ${selOpts}
         </select></td>
         <td class="amount">${fmt(t.out)}</td>
-      </tr>`).join('');
+      </tr>`;}).join('');
 
     document.getElementById('alert-area').innerHTML=`
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
@@ -1945,6 +2011,7 @@ window.openCatModal = openCatModal;
 window.closeModal = closeModal;
 window.saveModalChanges = saveModalChanges;
 window.changeModalCat = changeModalCat;
+window.changeModalGroup = changeModalGroup;
 window.addGroup = addGroup;
 window.saveAccountConfig = saveAccountConfig;
 async function saveAccountConfig(){
