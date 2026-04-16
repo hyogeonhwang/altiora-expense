@@ -349,7 +349,23 @@ hr{border:none;border-top:1px solid var(--border);margin:16px 0}
 <!-- ===================== SETTINGS TAB ===================== -->
 <div id="tab-settings" class="tab-panel">
   <div class="card">
-    <div class="card-title">구분별 키워드 관리</div>
+    <div class="card-title">📌 계좌 설정</div>
+    <div class="alert alert-info">KB 통장 파일 업로드 시 계좌번호로 자동 판별해요. 파일명에 상관없이 정확하게 분류돼요.</div>
+    <div class="row" style="gap:16px;flex-wrap:wrap">
+      <div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:4px">입금계좌 번호 (수강료 받는 통장)</div>
+        <input type="text" id="income-acct-input" placeholder="예: 045537-04-004" style="width:200px">
+      </div>
+      <div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:4px">출금계좌 번호 (급여/비용 나가는 통장)</div>
+        <input type="text" id="expense-acct-input" placeholder="예: 045537-04-005" style="width:200px">
+      </div>
+      <div style="display:flex;align-items:flex-end">
+        <button class="btn btn-gold" onclick="saveAccountConfig()">저장</button>
+      </div>
+    </div>
+    <div id="acct-config-status" style="margin-top:8px;font-size:12px;color:var(--muted)"></div>
+  </div>
     <div class="alert alert-info">각 구분 항목 아래 키워드를 추가하면, 통장 내역에서 해당 키워드가 포함된 거래를 자동 분류해요.</div>
     <div class="row" style="margin-bottom:16px">
       <input type="text" id="new-group-name" placeholder="새 구분명 (예: 복리후생)" style="width:180px">
@@ -436,8 +452,7 @@ const GROUPS = {
   '대출원리금': ['대출원리금','대출이자'],
   '기타지출': ['현수막제작비','기타사용'],
   '계좌간대체': ['계좌간대체'],
-  '가수금': ['가수금'],
-  '가수금입금': ['가수금입금'],
+  '가수금': ['가수금','가수금입금'],
 };
 
 const DEFAULT_RULES = {
@@ -582,16 +597,45 @@ function handleFiles(files){
     reader.onload=e=>{
       const wb=XLSX.read(e.target.result,{type:'array'});
 
+      // 계좌번호로 입금/출금 판단 (가장 신뢰성 높음)
+      const fileName=(file.name||'').toLowerCase();
+      const isIncomeFile=fileName.includes('입금');
+      const isExpenseFile=fileName.includes('출금');
+
       // 시트가 여러 개면 각 시트를 순서대로 처리 (월별 분리)
       const sheetsToProcess=wb.SheetNames.length>1?wb.SheetNames:[wb.SheetNames[0]];
 
       sheetsToProcess.forEach(sheetName=>{
         const ws=wb.Sheets[sheetName];
         const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:''});
-        if(!rows||rows.length<3)return; // 빈 시트 스킵
-        const firstRow=String((rows[0]&&rows[0][0])||'');
-        const isIncome=firstRow.includes('입금계좌');
-        const txns=parseStatement(rows, isIncome);
+        if(!rows||rows.length<3)return;
+
+        // 1) 계좌번호 추출 (행0~5에서 '계좌번호' 포함 셀 탐색)
+        let acctNum='';
+        for(let ri=0;ri<Math.min(6,rows.length);ri++){
+          const cell=String(rows[ri][0]||'');
+          const m=cell.match(/계좌번호\s*[:\:]\s*([\d\-]+)/);
+          if(m){acctNum=m[1].replace(/-/g,'');break;}
+        }
+
+        // 2) isIncome 판단: 저장된 계좌번호 > 파일명 순으로 우선
+        let isIncome;
+        const incomeAcct=(DB.config?.incomeAccount||'').replace(/-/g,'');
+        const expenseAcct=(DB.config?.expenseAccount||'').replace(/-/g,'');
+        if(acctNum&&incomeAcct&&acctNum===incomeAcct) isIncome=true;
+        else if(acctNum&&expenseAcct&&acctNum===expenseAcct) isIncome=false;
+        else if(isIncomeFile) isIncome=true;
+        else if(isExpenseFile) isIncome=false;
+        else{
+          const firstRow=String((rows[0]&&rows[0][0])||'');
+          isIncome=firstRow.includes('입금계좌');
+        }
+        console.log(`[시트:${sheetName}] 계좌번호=${acctNum}, isIncome=${isIncome}`);
+        // 시트명에서 월 번호 추출 (예: '1월' → 1, '2월' → 2)
+        const sheetMonthMatch=sheetName.match(/(\d{1,2})월/);
+        const sheetMonth=sheetMonthMatch?parseInt(sheetMonthMatch[1]):null;
+
+        const txns=parseStatement(rows, isIncome, sheetMonth);
         if(txns&&txns.length){
           if(isIncome) allIn=allIn.concat(txns);
           else allOut=allOut.concat(txns);
@@ -634,7 +678,7 @@ function handleFiles(files){
 
 function handleFile(file){handleFiles([file]);}
 
-function parseStatement(rows, isIncome){
+function parseStatement(rows, isIncome, sheetMonth=null){
   let headerRow=-1;
   for(let i=0;i<rows.length;i++){
     if(rows[i].some(c=>String(c).includes('거래일시'))){headerRow=i;break;}
@@ -646,7 +690,8 @@ function parseStatement(rows, isIncome){
   const iSender=headers.findIndex(h=>h.includes('보낸분')||h.includes('받는분'));
   const iOut=headers.findIndex(h=>h.includes('출금액'));
   const iIn=headers.findIndex(h=>h.includes('입금액'));
-  const iBal=headers.findIndex(h=>h.includes('잔액'));
+  const iBal=headers.findIndex(h=>h.includes('잔액')||h.includes('잔금')||h.includes('balance'));
+  const iAmt=headers.findIndex(h=>h.includes('거래금액')||h.includes('금액'));
   const iMemo=headers.findIndex(h=>h.includes('내 통장'));
 
   const txns=[];
@@ -661,8 +706,11 @@ function parseStatement(rows, isIncome){
     let cat;
     if(isIncome){
       if(inp>0){
-        // 입금계좌 입금: 황효건이면 가수금입금, 나머지는 수입
-        cat=(normalizeStr(sender).includes('황효건')||normalizeStr(memo).includes('황효건'))?'가수금입금':'수입';
+        // 입금계좌 입금: 계좌간대체 먼저 체크, 황효건이면 가수금입금, 나머지는 수입
+        const matched=matchCategory(memo,sender);
+        if(matched==='계좌간대체') cat='계좌간대체';
+        else if(normalizeStr(sender).includes('황효건')||normalizeStr(memo).includes('황효건')) cat='가수금입금';
+        else cat='수입';
       } else {
         // 입금계좌 출금: 일반 매칭 규칙 적용
         cat=matchCategory(memo,sender);
@@ -670,8 +718,14 @@ function parseStatement(rows, isIncome){
     } else {
       cat=matchCategory(memo,sender);
     }
+    const dateStr=String(r[iDate]).slice(0,10).replace(/\./g,'-');
+    // 시트명 월 필터: 지정된 월의 데이터만 처리 (중복 방지)
+    if(sheetMonth){
+      const rowMonth=parseInt(dateStr.slice(5,7));
+      if(rowMonth!==sheetMonth)continue;
+    }
     txns.push({
-      date:String(r[iDate]).slice(0,10).replace(/\./g,'-'),  // 2026.03.31 → 2026-03-31
+      date:dateStr,
       memo:memo||sender, rawMemo:memo, rawSender:sender,
       out, inp,
       bal:Number(String(r[iBal]||0).replace(/,/g,''))||0,
@@ -806,7 +860,7 @@ async function saveAllMonths(){
     const outTxns=byMonthOut[mk]||[];
     const inTxns=byMonthIn[mk]||[];
     const summary={};
-    let totalOut=0,totalIn=0,outLastBal=0,inLastBal=0;
+    let totalOut=0,totalIn=0,outLastBal=0,inLastBal=0,gasugumIn=0;
     outTxns.forEach(t=>{
       if(t.out>0){
         totalOut+=t.out;
@@ -816,18 +870,26 @@ async function saveAllMonths(){
       }
       if(t.bal)outLastBal=t.bal;
     });
+    let gyeJwaIn=0;
     inTxns.forEach(t=>{
-      if(t.inp>0) totalIn+=t.inp; // 가수금입금 포함 모든 입금
+      if(t.inp>0&&t.cat!=='계좌간대체') totalIn+=t.inp;
+      else if(t.inp>0&&t.cat==='계좌간대체'){
+        gyeJwaIn+=t.inp;
+        console.log(`[${mk}] 계좌간대체 수신 제외: ${t.date} ${t.memo} ${t.inp}원 (cat=${t.cat})`);
+      }
+      if(t.inp>0&&t.cat==='가수금입금') gasugumIn+=t.inp;
       if(t.out>0){
-        // 입금계좌에서 나가는 출금도 지출로 처리 (계좌간대체 제외)
         const cat=t.cat||'기타사용';
-        summary[cat]=(summary[cat]||0)+t.out;
-        if(cat!=='계좌간대체') totalOut+=t.out;
+        if(cat!=='계좌간대체'){
+          summary[cat]=(summary[cat]||0)+t.out;
+          totalOut+=t.out;
+        }
       }
       if(t.bal)inLastBal=t.bal;
     });
-    const lastBal=outLastBal+inLastBal; // 두 계좌 합산
-    const monthData=Object.assign({},summary,{_meta:{totalOut,totalIn,lastBal,outLastBal,inLastBal,savedAt:new Date().toISOString()}});
+    const lastBal=outLastBal+inLastBal;
+    console.log(`[${mk}] totalIn=${totalIn}, gyeJwaIn(제외됨)=${gyeJwaIn}, outLastBal=${outLastBal}, inLastBal=${inLastBal}`);
+    const monthData=Object.assign({},summary,{_meta:{totalOut,totalIn,gasugumIn,lastBal,outLastBal,inLastBal,savedAt:new Date().toISOString()}});
     await saveDB(mk, monthData, outTxns);  // 원본 거래내역 같이 저장
   }
   hideLoading();
@@ -1014,18 +1076,21 @@ async function saveMonth(){
     }
     if(t.bal)outLastBal=t.bal;
   });
+  let gasugumIn=0;
   inTxns.forEach(t=>{
-    if(t.inp>0) totalIn+=t.inp; // 가수금입금 포함 모든 입금
+    if(t.inp>0&&t.cat!=='계좌간대체') totalIn+=t.inp; // 계좌간대체 수신 제외
+    if(t.inp>0&&t.cat==='가수금입금') gasugumIn+=t.inp;
     if(t.out>0){
-      // 입금계좌 출금도 지출로 처리 (계좌간대체 제외)
       const cat=t.cat||'기타사용';
-      summary[cat]=(summary[cat]||0)+t.out;
-      if(cat!=='계좌간대체') totalOut+=t.out;
+      if(cat!=='계좌간대체'){
+        summary[cat]=(summary[cat]||0)+t.out;
+        totalOut+=t.out;
+      }
     }
     if(t.bal)inLastBal=t.bal;
   });
-  const lastBal=outLastBal+inLastBal; // 두 계좌 합산
-  const monthData=Object.assign({},summary,{_meta:{totalOut,totalIn,lastBal,outLastBal,inLastBal,savedAt:new Date().toISOString()}});
+  const lastBal=outLastBal+inLastBal;
+  const monthData=Object.assign({},summary,{_meta:{totalOut,totalIn,gasugumIn,lastBal,outLastBal,inLastBal,savedAt:new Date().toISOString()}});
   showLoading('저장 중...');
   await saveDB(key, monthData, txns);  // 원본 거래내역 같이 저장
   hideLoading();
@@ -1067,40 +1132,41 @@ function renderMonthly(){
   const meta=data._meta||{};
   // 현금흐름 총지출: 계좌간대체 제외 전체 (가수금 포함)
   const totalOut=allCats().filter(c=>c!=='계좌간대체'&&c!=='가수금입금').reduce((s,c)=>s+(data[c]||0),0);
-  // 영업손익: 가수금 입출금 모두 제외
-  const gasugumIn=data['가수금입금']||0;
+  // 가수금 입출금
+  const gasugumIn=meta.gasugumIn||data['가수금입금']||0; // meta에서 우선 읽기
   const gasugeum=data['가수금']||0;
-  const operOut=totalOut-gasugeum; // 가수금 출금 제외
+  // 영업손익: 가수금 입출금 모두 제외
+  const operOut=totalOut-gasugeum;
   const totalIn=meta.totalIn||0;
-  const operIn=totalIn-gasugumIn;  // 가수금 입금 제외
+  const operIn=totalIn-gasugumIn;
   const lastBal=meta.lastBal||0;
-  const profit=operIn-operOut; // 영업현금흐름 손익
+  const profit=operIn-operOut;
 
   const prevMeta=(prev&&prev._meta)||{};
-  const prevTotalOut=prevMeta.totalOut||0;
-  const prevTotalIn=prevMeta.totalIn||0;
+  const prevOperOut=(prevMeta.totalOut||0)-(prevMeta['가수금']||0);
+  const prevOperIn=(prevMeta.totalIn||0)-(prevMeta.gasugumIn||0);
 
-  // 수입
-  document.getElementById('kpi-total-in').textContent=fmtShort(totalIn);
-  const inDiff=totalIn-prevTotalIn;
-  document.getElementById('kpi-in-diff').textContent=prevTotalIn?(inDiff>=0?'▲':'▼')+' '+fmtShort(Math.abs(inDiff))+'  전월대비':'';
+  // 수입 (영업기준: 가수금입금 제외)
+  document.getElementById('kpi-total-in').textContent=fmtShort(operIn);
+  const inDiff=operIn-prevOperIn;
+  document.getElementById('kpi-in-diff').textContent=prevOperIn?(inDiff>=0?'▲':'▼')+' '+fmtShort(Math.abs(inDiff))+'  전월대비':'';
   document.getElementById('kpi-in-diff').className='kpi-sub '+(inDiff>=0?'down':'up');
 
-  // 지출
-  document.getElementById('kpi-total').textContent=fmtShort(totalOut);
-  const outDiff=totalOut-prevTotalOut;
-  document.getElementById('kpi-total-diff').textContent=prevTotalOut?(outDiff>=0?'▲':'▼')+' '+fmtShort(Math.abs(outDiff))+'  전월대비':'';
+  // 지출 (영업기준: 가수금출금 제외)
+  document.getElementById('kpi-total').textContent=fmtShort(operOut);
+  const outDiff=operOut-prevOperOut;
+  document.getElementById('kpi-total-diff').textContent=prevOperOut?(outDiff>=0?'▲':'▼')+' '+fmtShort(Math.abs(outDiff))+'  전월대비':'';
   document.getElementById('kpi-total-diff').className='kpi-sub '+(outDiff>=0?'up':'down');
 
-  // 손익
+  // 손익 (영업기준)
   document.getElementById('kpi-profit').textContent=(profit>=0?'+':'')+fmtShort(profit);
   document.getElementById('kpi-profit').style.color=profit>=0?'var(--green)':'var(--red)';
   document.getElementById('kpi-profit-sub').textContent=profit>=0?'이달 흑자':'이달 적자';
   document.getElementById('kpi-profit-sub').className='kpi-sub '+(profit>=0?'down':'up');
 
-  // 월말잔액
+  // 월말잔액 (2계좌 합산)
   document.getElementById('kpi-balance').textContent=fmtShort(lastBal);
-  document.getElementById('kpi-balance-sub').textContent=lastBal?'출금계좌 기준':'';
+  document.getElementById('kpi-balance-sub').textContent=lastBal?'2계좌 합산':'';
 
   // Donut chart
   const catData=allCats().filter(c=>data[c]>0).map(c=>({cat:c,val:data[c],group:groupOf(c)}));
@@ -1138,10 +1204,10 @@ function renderMonthly(){
   // 수입/지출 요약 + 잔액 검증
   const summaryEl=document.getElementById('income-expense-summary');
   if(summaryEl){
-    // 잔액검증: 전월말 + 현금유입(전체) - 현금유출(계좌간대체 제외) = 당월말
+    // 잔액검증: 전월말(2계좌) + 영업수입 - 영업지출 = 당월말(2계좌)
+    // 계좌간대체는 두 계좌 간 내부이동이라 합산잔액 변화 없음 → 공식에서 제외
     const prevBal=prevMeta.lastBal||0;
-    const gyeJwa=data['계좌간대체']||0;
-    const allOutTxns=totalOut+gyeJwa; // 계좌간대체는 totalOut에서 빠져있으니 별도 추가
+    const allOutTxns=totalOut; // 계좌간대체 제외, 순수 외부 현금유출만
     const expectedBal=prevBal+totalIn-allOutTxns;
     const actualBal=lastBal;
     const balDiff=actualBal-expectedBal;
@@ -1155,15 +1221,15 @@ function renderMonthly(){
         <button class="btn btn-gold btn-sm" onclick="savePrevBal('${prevKey}',document.getElementById('prev-bal-input').value)">저장</button>
       </div>`;
 
-    const inPct=totalIn?(totalIn/(totalIn+totalOut)*100).toFixed(1):0;
-    const outPct=totalIn?(totalOut/(totalIn+totalOut)*100).toFixed(1):100;
+    const inPct=operIn?(operIn/(operIn+operOut)*100).toFixed(1):0;
+    const outPct=operIn?(operOut/(operIn+operOut)*100).toFixed(1):100;
 
     summaryEl.innerHTML=`
       <div style="display:flex;gap:24px;margin-bottom:16px;flex-wrap:wrap">
         <div style="flex:1;min-width:200px">
           <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:6px">
-            <span style="color:var(--green);font-weight:600">📥 수입 ${fmtShort(totalIn)}</span>
-            <span style="color:var(--red);font-weight:600">📤 지출 ${fmtShort(totalOut)}</span>
+            <span style="color:var(--green);font-weight:600">📥 영업수입 ${fmtShort(operIn)}</span>
+            <span style="color:var(--red);font-weight:600">📤 영업지출 ${fmtShort(operOut)}</span>
           </div>
           <div style="height:10px;background:#FFE5E5;border-radius:5px;overflow:hidden">
             <div style="height:100%;width:${inPct}%;background:var(--green);border-radius:5px"></div>
@@ -1194,7 +1260,7 @@ function renderMonthly(){
           <span>＝</span>
           <span>예상잔액 <b style="color:var(--navy)">${fmt(expectedBal)}</b></span>
           <span style="margin-left:8px">실제잔액 <b style="color:var(--navy)">${fmt(actualBal)}</b>
-            <span style="font-size:11px;color:var(--muted);margin-left:4px">(출금 ${fmt(meta.outLastBal||0)} + 입금 ${fmt(meta.inLastBal||0)})</span>
+            ${(meta.outLastBal||meta.inLastBal)?`<span style="font-size:11px;color:var(--muted);margin-left:4px">(출금 ${fmt(meta.outLastBal||0)} + 입금 ${fmt(meta.inLastBal||0)})</span>`:'<span style="font-size:11px;color:var(--red);margin-left:4px">⚠ 재업로드 필요</span>'}
           </span>
           ${!balOk?`<span style="color:var(--red);font-weight:600">차이 ${fmt(Math.abs(balDiff))} → 확인 필요</span>`:'<span style="color:var(--green)">✅ 일치</span>'}
         </div>
@@ -1274,7 +1340,15 @@ function renderMonthly(){
     tbody.appendChild(tr);
   });
 
-  // 가수금 하단 별도 표기 (gasugeum, gasugumIn은 위에서 이미 선언됨)
+  // 총합계 행
+  const totalRow=document.createElement('tr');
+  totalRow.style.cssText='background:var(--navy);color:#fff;font-weight:700';
+  totalRow.innerHTML=`
+    <td colspan="2" style="padding:10px 16px;font-size:13px">총 지출 합계</td>
+    <td class="amount" style="text-align:right;padding:10px 16px;font-size:14px;color:#FFD580">${fmt(totalOut)}</td>
+    <td style="text-align:right;padding:10px 16px;font-size:12px;color:rgba(255,255,255,.7)">100%</td>
+    <td></td>`;
+  tbody.appendChild(totalRow);
   const gasugeumSection=document.getElementById('gasugeum-section');
   const gasugeumDetail=document.getElementById('gasugeum-detail');
   if(gasugeumSection&&gasugeumDetail){
@@ -1372,22 +1446,29 @@ async function saveModalChanges(){
   if(!_modalKey||!_modalTxns.length)return;
   showLoading('저장 중...');
   try {
-    // 거래내역 업데이트
     await setDoc(doc(fsDB,'transactions',_modalKey),{txns:JSON.stringify(_modalTxns)});
-    // 월 집계 재계산
-    const[y,m]=_modalKey.split('-');
+    const prevMeta=(DB.monthly[_modalKey]&&DB.monthly[_modalKey]._meta)||{};
+    const inLastBal=prevMeta.inLastBal||0; // 입금계좌 잔액 보존
     const summary={};
-    let totalOut=0,totalIn=0,lastBal=0;
+    let totalOut=0,outLastBal=0;
     _modalTxns.forEach(t=>{
       if(t.out>0){
         const cat=t.cat||'기타사용';
         summary[cat]=(summary[cat]||0)+t.out;
         if(cat!=='계좌간대체') totalOut+=t.out;
       }
-      if(t.bal)lastBal=t.bal;
+      if(t.bal)outLastBal=t.bal;
     });
-    const prevMeta=(DB.monthly[_modalKey]&&DB.monthly[_modalKey]._meta)||{};
-    const monthData=Object.assign({},summary,{_meta:{totalOut,totalIn:prevMeta.totalIn||0,lastBal,savedAt:new Date().toISOString()}});
+    const combinedLastBal=outLastBal+inLastBal;
+    const monthData=Object.assign({},summary,{_meta:{
+      totalOut,
+      totalIn:prevMeta.totalIn||0,
+      gasugumIn:prevMeta.gasugumIn||0,
+      lastBal:combinedLastBal,
+      outLastBal,
+      inLastBal,
+      savedAt:new Date().toISOString()
+    }});
     await saveDB(_modalKey, monthData);
     hideLoading();
     closeModal();
@@ -1453,7 +1534,13 @@ function renderAnnual(){
     return DB.monthly[key]||null;
   });
 
-  const totals=monthData.map(d=>d?(d._meta||{}).totalOut||allCats().reduce((s,c)=>s+(d[c]||0),0):null);
+  // 가수금 제외 영업지출 기준 totals
+  const operCats=allCats().filter(c=>c!=='계좌간대체'&&c!=='가수금입금'&&c!=='가수금');
+  const totals=monthData.map(d=>{
+    if(!d)return null;
+    const v=operCats.reduce((s,c)=>s+(d[c]||0),0);
+    return v||null;
+  });
   const validTotals=totals.filter(Boolean);
   const annualTotal=validTotals.reduce((s,v)=>s+v,0);
 
@@ -1484,8 +1571,8 @@ function renderAnnual(){
     }
   });
 
-  // Stack chart by group
-  const grpKeys=Object.keys(DB.groups);
+  // Stack chart by group (가수금 제외)
+  const grpKeys=Object.keys(DB.groups).filter(g=>g!=='가수금');
   const COLORS2=['#1A2A4A','#2C4A7C','#C9A84C','#27AE60','#E74C3C','#8E44AD','#E67E22','#2980B9','#16A085','#F39C12'];
   const datasets=grpKeys.map((g,gi)=>({
     label:g,
@@ -1508,12 +1595,13 @@ function renderAnnual(){
     }
   });
 
-  // Annual table
+  // Annual table (가수금 제외, 맨 아래 별도 표시)
   const tbody=document.getElementById('annual-tbody');
   tbody.innerHTML='';
   let lastGrp='';
   allCats().forEach(cat=>{
     const g=groupOf(cat);
+    if(g==='가수금')return; // 가수금은 맨 아래 별도 표시
     const mVals=months.map((_,i)=>monthData[i]?monthData[i][cat]||0:null);
     const total=mVals.reduce((s,v)=>s+(v||0),0);
     if(!total)return;
@@ -1542,10 +1630,30 @@ function renderAnnual(){
       <td class="amount" style="color:var(--muted)">${nonNull.length?fmt(total/nonNull.length):'-'}</td>`;
     tbody.appendChild(tr);
   });
-}
 
-// ============================================================
-// SETTINGS
+  // 가수금 맨 아래 별도 표시
+  const gasugumCats=['가수금','가수금입금'];
+  const hasGasugum=gasugumCats.some(c=>monthData.some(d=>d&&d[c]));
+  if(hasGasugum){
+    const sepTr=document.createElement('tr');
+    sepTr.innerHTML=`<td colspan="${14+2}" style="height:8px;background:var(--bg)"></td>`;
+    tbody.appendChild(sepTr);
+    gasugumCats.forEach(cat=>{
+      const mVals=months.map((_,i)=>monthData[i]?monthData[i][cat]||0:null);
+      const total=mVals.reduce((s,v)=>s+(v||0),0);
+      if(!total)return;
+      const tr=document.createElement('tr');
+      tr.style.cssText='background:#FEF9E7;color:var(--muted)';
+      tr.innerHTML=`
+        <td style="font-size:12px">가수금</td>
+        <td style="font-size:12px">${cat}</td>
+        ${mVals.map(v=>`<td class="amount" style="font-size:12px">${v&&v>0?Math.round(v/10000)+'만':'-'}</td>`).join('')}
+        <td class="amount" style="font-size:12px;font-weight:700">${fmt(total)}</td>
+        <td class="amount" style="font-size:12px;color:var(--muted)">-</td>`;
+      tbody.appendChild(tr);
+    });
+  }
+}
 // ============================================================
 function addGroup(){
   const name=document.getElementById('new-group-name').value.trim();
@@ -1559,6 +1667,18 @@ function addGroup(){
 }
 
 function renderSettings(){
+  // 계좌번호 설정 로드
+  const incomeAcct=DB.config?.incomeAccount||'';
+  const expenseAcct=DB.config?.expenseAccount||'';
+  const iEl=document.getElementById('income-acct-input');
+  const eEl=document.getElementById('expense-acct-input');
+  if(iEl) iEl.value=incomeAcct;
+  if(eEl) eEl.value=expenseAcct;
+  const status=document.getElementById('acct-config-status');
+  if(status){
+    if(incomeAcct||expenseAcct)
+      status.textContent=`현재 설정: 입금계좌 ${incomeAcct||'미설정'} / 출금계좌 ${expenseAcct||'미설정'}`;
+  }
   const el=document.getElementById('keyword-by-group');
   if(!el)return;
 
@@ -1826,6 +1946,18 @@ window.closeModal = closeModal;
 window.saveModalChanges = saveModalChanges;
 window.changeModalCat = changeModalCat;
 window.addGroup = addGroup;
+window.saveAccountConfig = saveAccountConfig;
+async function saveAccountConfig(){
+  const incomeAcct=document.getElementById('income-acct-input').value.trim();
+  const expenseAcct=document.getElementById('expense-acct-input').value.trim();
+  if(!DB.config) DB.config={};
+  DB.config.incomeAccount=incomeAcct;
+  DB.config.expenseAccount=expenseAcct;
+  showLoading('저장 중...');
+  await saveDB(null,null);
+  hideLoading();
+  document.getElementById('acct-config-status').textContent=`✅ 저장됨: 입금계좌 ${incomeAcct||'미설정'} / 출금계좌 ${expenseAcct||'미설정'}`;
+}
 window.savePrevBal = savePrevBal;
 window.renderSettings = renderSettings;
 window.addKeywordToGroup = addKeywordToGroup;
