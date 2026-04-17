@@ -998,14 +998,15 @@ function renderUploadResult(txns, monthKey, inTxns){
 function updateCat(sel,idx){
   const val=sel.value||null;
   window._pendingTxns[idx].cat=val;
+  const row=sel.closest('tr');
   if(val){
-    // 분류됐으면 행 숨김
-    const row=sel.closest('tr');
-    if(row) row.style.display='none';
+    if(row) row.style.background='#F0FFF4';
+    sel.style.background='#fff';
     const remaining=window._pendingTxns.filter(t=>!t.cat&&t.out>0).length;
     const badge=document.getElementById('uncat-badge');
-    if(badge) badge.textContent=remaining+'건 미분류';
+    if(badge){badge.textContent=remaining+'건 미분류';badge.style.display=remaining?'inline-block':'none';}
   } else {
+    if(row) row.style.background='';
     sel.style.background='#FFF3E0';
   }
 }
@@ -1014,21 +1015,20 @@ function updateCatByGroup(sel,idx){
   const groupName=sel.value;
   if(!groupName){
     window._pendingTxns[idx].cat=null;
+    sel.closest('tr').style.background='';
     sel.style.background='#FFF3E0';
     return;
   }
-  // 그룹의 첫 번째 카테고리를 저장
   const cats=DB.groups[groupName]||[];
   window._pendingTxns[idx].cat=cats[0]||groupName;
-  // 분류됐으면 해당 행 즉시 숨김
+  // 분류됐으면 행 배경색 변경 (사라지지 않음 - 실수 수정 가능)
   const row=sel.closest('tr');
-  if(row) row.style.display='none';
+  if(row) row.style.background='#F0FFF4';
+  sel.style.background='#fff';
   // 미분류 카운트 업데이트
   const remaining=window._pendingTxns.filter(t=>!t.cat&&t.out>0).length;
   const badge=document.getElementById('uncat-badge');
-  if(badge) badge.textContent=remaining+'건 미분류';
-  const header=document.querySelector('[data-uncat-count]');
-  if(header) header.textContent=`✏️ 미분류 ${remaining}건 수정`;
+  if(badge){badge.textContent=remaining+'건 미분류';badge.style.display=remaining?'inline-block':'none';}
 }
 window.updateCatByGroup=updateCatByGroup;
 
@@ -1043,7 +1043,7 @@ function editMonthTxns(mk){
     <tr>
       <td style="font-size:12px;color:var(--muted)">${t.date.slice(5)}</td>
       <td style="font-size:13px">${t.memo||'-'}</td>
-      <td><select onchange="updateMultiCat('${mk}',${txns.indexOf(t)},this.value)" style="width:100%;padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:#FFF3E0">
+      <td><select onchange="updateMultiCat('${mk}',${txns.indexOf(t)},this.value,this)" style="width:100%;padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:#FFF3E0">
         ${grpOpts2}
       </select></td>
       <td class="amount">${fmt(t.out)}</td>
@@ -1062,29 +1062,45 @@ function editMonthTxns(mk){
     </div>`;
 }
 
-function updateMultiCat(mk,idx,groupName){
+function updateMultiCat(mk,idx,groupName,sel){
   if(!window._multiMonthTxns[mk])return;
   const cats=DB.groups[groupName]||[];
   window._multiMonthTxns[mk][idx].cat=groupName?cats[0]||groupName:null;
+  if(sel){
+    const row=sel.closest('tr');
+    if(row) row.style.background=groupName?'#F0FFF4':'';
+    sel.style.background=groupName?'#fff':'#FFF3E0';
+  }
 }
 
 async function saveEditedMonth(mk){
+  const[y,m]=mk.split('-');
   const txns=window._multiMonthTxns[mk]||[];
-  const inTxns=window._multiMonthInTxns[mk]||[];
+  const prevMeta=(DB.monthly[mk]&&DB.monthly[mk]._meta)||{};
   const summary={};
-  let totalOut=0,totalIn=0,lastBal=0;
+  let totalOut=0,outLastBal=0;
   txns.forEach(t=>{
-    if(t.out>0){totalOut+=t.out;const cat=t.cat||'기타사용';summary[cat]=(summary[cat]||0)+t.out;}
-    if(t.bal)lastBal=t.bal;
+    if(t.out>0){
+      const cat=t.cat||'기타사용';
+      summary[cat]=(summary[cat]||0)+t.out;
+      if(cat!=='계좌간대체') totalOut+=t.out;
+    }
+    if(t.bal)outLastBal=t.bal;
   });
-  inTxns.forEach(t=>{if(t.inp>0)totalIn+=t.inp;});
-  const monthData=Object.assign({},summary,{_meta:{totalOut,totalIn,lastBal,savedAt:new Date().toISOString()}});
+  // 입금계좌 데이터 보존
+  const inLastBal=prevMeta.inLastBal||0;
+  const totalIn=prevMeta.totalIn||0;
+  const gasugumIn=prevMeta.gasugumIn||0;
+  const lastBal=outLastBal+inLastBal;
+  const monthData=Object.assign({},summary,{_meta:{
+    totalOut,totalIn,gasugumIn,lastBal,outLastBal,inLastBal,
+    savedAt:new Date().toISOString()
+  }});
   showLoading('재저장 중...');
-  await saveDB(mk, monthData);
+  await saveDB(mk, monthData, txns);
   hideLoading();
-  document.getElementById('edit-month-area').innerHTML=`<div class="alert alert-success" style="margin-top:8px">✅ ${mk} 재저장 완료</div>`;
-  const remaining=txns.filter(t=>!t.cat&&t.out>0).length;
-  alert(`✅ ${mk} 재저장 완료\n남은 미분류: ${remaining}건`);
+  refreshSavedMonths();
+  document.getElementById('edit-month-area').innerHTML=`<div class="alert alert-success" style="margin-top:8px">✅ ${y}년 ${parseInt(m)}월 저장 완료</div>`;
 }
 
 function goMonthly(){
@@ -1139,16 +1155,10 @@ async function saveMonth(){
   const lastBal=outLastBal+inLastBal;
   const monthData=Object.assign({},summary,{_meta:{totalOut,totalIn,gasugumIn,lastBal,outLastBal,inLastBal,savedAt:new Date().toISOString()}});
   showLoading('저장 중...');
-  await saveDB(key, monthData, txns);  // 원본 거래내역 같이 저장
+  await saveDB(key, monthData, txns);
   hideLoading();
-
-  // 저장 버튼 숨기고 upload-result 닫기
-  document.getElementById('upload-result').style.display='none';
-  document.getElementById('btn-save-month').style.display='inline-block';
-  document.getElementById('btn-go-monthly').style.display='none';
-
-  // 저장된 월별 내역 표 새로고침
   refreshSavedMonths();
+  alert(`✅ ${key} 저장 완료`);
 }
 
 // ============================================================
@@ -1846,8 +1856,8 @@ async function editSavedMonth(mk){
     }
     const txns = JSON.parse(snap.data().txns||'[]');
     const [y,m]=mk.split('-');
-    // 미분류 항목만 추출
-    const uncats=txns.filter(t=>(!t.cat||t.cat==='기타사용')&&t.out>0);
+    // 미분류 항목만 추출 (기타사용은 분류된 것으로 간주)
+    const uncats=txns.filter(t=>!t.cat&&t.out>0);
     if(uncats.length===0){
       alert('미분류 항목이 없어요. 모두 분류 완료됐습니다.');
       return;
@@ -1881,16 +1891,54 @@ async function editSavedMonth(mk){
       <table>
         <thead><tr><th>날짜</th><th>내역</th><th>카테고리</th><th>금액</th></tr></thead>
         <tbody>${rows}</tbody>
-      </table>`;
+      </table>
+      <div style="text-align:right;margin-top:12px">
+        <button class="btn btn-gold" onclick="saveEditedMonthFromEdit('${mk}')">✅ 이 월 저장</button>
+      </div>`;
     document.getElementById('result-table-wrap').style.display='none';
     document.getElementById('result-summary').innerHTML='';
     document.getElementById('uncat-badge').textContent=uncats.length+'건 미분류';
     document.getElementById('uncat-badge').style.display='inline-block';
-    document.getElementById('btn-save-month').style.display='inline-block';
+    document.getElementById('btn-save-month').style.display='none';
     document.getElementById('btn-go-monthly').style.display='none';
     document.getElementById('upload-result').style.display='block';
   } catch(e){ hideLoading(); console.error(e); alert('오류: '+e.message); }
 }
+
+async function saveEditedMonthFromEdit(mk){
+  const txns=window._pendingTxns||[];
+  const[y,m]=mk.split('-');
+  const prevMeta=(DB.monthly[mk]&&DB.monthly[mk]._meta)||{};
+  const summary={};
+  let totalOut=0,outLastBal=0;
+  txns.forEach(t=>{
+    if(t.out>0){
+      const cat=t.cat||'기타사용';
+      summary[cat]=(summary[cat]||0)+t.out;
+      if(cat!=='계좌간대체') totalOut+=t.out;
+    }
+    if(t.bal)outLastBal=t.bal;
+  });
+  const inLastBal=prevMeta.inLastBal||0;
+  const totalIn=prevMeta.totalIn||0;
+  const gasugumIn=prevMeta.gasugumIn||0;
+  const lastBal=outLastBal+inLastBal;
+  const monthData=Object.assign({},summary,{_meta:{
+    totalOut,totalIn,gasugumIn,lastBal,outLastBal,inLastBal,
+    savedAt:new Date().toISOString()
+  }});
+  showLoading('저장 중...');
+  await saveDB(mk, monthData, txns);
+  hideLoading();
+  // 화면 전환 없이 버튼 텍스트만 잠깐 변경
+  const btn=document.querySelector(`[onclick="saveEditedMonthFromEdit('${mk}')"]`);
+  if(btn){
+    btn.textContent='✅ 저장됨';
+    btn.disabled=true;
+    setTimeout(()=>{btn.textContent='✅ 이 월 저장';btn.disabled=false;},2000);
+  }
+}
+window.saveEditedMonthFromEdit=saveEditedMonthFromEdit;
 
 async function deleteMonthData(mk){
   const[y,m]=mk.split('-');
