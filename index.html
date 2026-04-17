@@ -450,7 +450,7 @@ const GROUPS = {
   '카드대금': ['카드대금'],
   '원복': ['원복','원복비'],
   '대출원리금': ['대출원리금','대출이자'],
-  '기타지출': ['기타사용'],
+  '기타지출': ['기타사용','광고비','지급수수료','택배비','소모품비','지급임차료'],
   '계좌간대체': ['계좌간대체'],
   '가수금': ['가수금','가수금입금'],
 };
@@ -514,13 +514,25 @@ async function loadDB(){
   try {
     const monthly = await loadAllFS();
     DB.monthly = monthly;
+    // config/settings 로드 (계좌번호, 키워드 규칙)
+    try {
+      const cfgSnap = await getDoc(doc(fsDB,'config','settings'));
+      if(cfgSnap.exists()){
+        const cfg=cfgSnap.data();
+        if(cfg.userRules) DB.rules=Object.assign({},DEFAULT_RULES,cfg.userRules);
+        if(cfg.userCategories) DB.categories=cfg.userCategories;
+        if(cfg.userGroups) DB.groups=cfg.userGroups;
+        if(!DB.config) DB.config={};
+        DB.config.incomeAccount=cfg.incomeAccount||'';
+        DB.config.expenseAccount=cfg.expenseAccount||'';
+      }
+    } catch(e){ console.error('config 로드 오류:', e); }
     // 혹시 localStorage에 기존 데이터 있으면 병합 후 마이그레이션
     const local = localStorage.getItem(STORE_KEY);
     if(local && Object.keys(monthly).length===0){
       const saved = JSON.parse(local);
       if(saved.monthly && Object.keys(saved.monthly).length>0){
         DB.monthly = saved.monthly;
-        // Firestore로 마이그레이션
         showLoading('기존 데이터 이전 중...');
         for(const [k,v] of Object.entries(saved.monthly)){
           await saveMonthFS(k,v);
@@ -537,12 +549,13 @@ async function saveDB(key, data, txns){
     DB.monthly[key] = data;
     await saveMonthFS(key, data, txns);
   } else {
-    // key 없이 호출 시 변경된 monthly 전체 저장 (rules 등 변경 시)
-    // rules/categories는 별도 문서에 저장
     try {
       await setDoc(doc(fsDB,'config','settings'),{
         userRules: DB.rules,
-        userCategories: DB.categories
+        userCategories: DB.categories,
+        userGroups: DB.groups,
+        incomeAccount: DB.config?.incomeAccount||'',
+        expenseAccount: DB.config?.expenseAccount||''
       });
     } catch(e){ console.error(e); }
   }
@@ -1021,16 +1034,26 @@ function updateCatByGroup(sel,idx){
   }
   const cats=DB.groups[groupName]||[];
   window._pendingTxns[idx].cat=cats[0]||groupName;
-  // 분류됐으면 행 배경색 변경 (사라지지 않음 - 실수 수정 가능)
   const row=sel.closest('tr');
   if(row) row.style.background='#F0FFF4';
   sel.style.background='#fff';
-  // 미분류 카운트 업데이트
+  // 두 번째 드롭다운 업데이트
+  const catSel=document.getElementById(`editcat2-${idx}`);
+  if(catSel){
+    catSel.innerHTML=cats.map(c=>`<option value="${c}">${c}</option>`).join('');
+  }
   const remaining=window._pendingTxns.filter(t=>!t.cat&&t.out>0).length;
   const badge=document.getElementById('uncat-badge');
   if(badge){badge.textContent=remaining+'건 미분류';badge.style.display=remaining?'inline-block':'none';}
 }
+
+function updateCatByGroupCat(sel,idx,catName){
+  window._pendingTxns[idx].cat=catName;
+  const row=sel.closest('tr');
+  if(row) row.style.background='#F0FFF4';
+}
 window.updateCatByGroup=updateCatByGroup;
+window.updateCatByGroupCat=updateCatByGroupCat;
 
 function editMonthTxns(mk){
   const txns=window._multiMonthTxns[mk]||[];
@@ -1478,17 +1501,27 @@ function renderModal(){
   tbody.innerHTML=filtered.map(t=>{
     const realIdx=_modalTxns.indexOf(t);
     const curGroup=groupOf(t.cat||(t.out>0?'기타사용':null))||'기타지출';
+    const curCat=t.cat||'';
     const groupOpts=Object.keys(DB.groups)
       .filter(g=>g!=='계좌간대체')
       .map(g=>`<option value="${g}" ${g===curGroup?'selected':''}>${g}</option>`).join('');
+    const grpCats=DB.groups[curGroup]||[];
+    const catSel=grpCats.length>1
+      ?`<select id="cat2-${realIdx}" onchange="changeModalCat(${realIdx},this.value)" style="flex:1;min-width:80px;padding:4px 6px;font-size:12px;border:1px solid var(--border);border-radius:6px">
+          ${grpCats.map(c=>`<option value="${c}" ${c===curCat?'selected':''}>${c}</option>`).join('')}
+        </select>`
+      :'';
     return `<tr style="border-bottom:1px solid var(--border)">
       <td style="padding:8px;color:var(--muted);font-size:12px">${t.date?t.date.slice(5):''}</td>
       <td style="padding:8px;font-size:13px">${t.memo||'-'}</td>
       <td style="padding:8px;text-align:right;font-size:13px">${fmt(t.out)}</td>
       <td style="padding:8px">
-        <select onchange="changeModalGroup(${realIdx},this.value)" style="width:100%;padding:4px 6px;font-size:12px;border:1px solid var(--border);border-radius:6px">
-          ${groupOpts}
-        </select>
+        <div style="display:flex;gap:4px">
+          <select onchange="changeModalGroup(${realIdx},this.value)" style="flex:1;padding:4px 6px;font-size:12px;border:1px solid var(--border);border-radius:6px">
+            ${groupOpts}
+          </select>
+          ${catSel}
+        </div>
       </td>
     </tr>`;
   }).join('');
@@ -1496,12 +1529,12 @@ function renderModal(){
 
 function changeModalGroup(idx, groupName){
   const cats=DB.groups[groupName]||[];
-  // 그룹의 첫 번째 카테고리로 저장 (항상 실행)
   _modalTxns[idx].cat=cats[0]||groupName;
-  // 두 번째 드롭다운 있으면 업데이트
-  const catSel=document.getElementById(`cat-${idx}`);
+  // 두 번째 드롭다운 업데이트
+  const catSel=document.getElementById(`cat2-${idx}`);
   if(catSel){
     catSel.innerHTML=cats.map(c=>`<option value="${c}">${c}</option>`).join('');
+    catSel.onchange=function(){changeModalCat(idx,this.value);};
   }
 }
 
@@ -1689,9 +1722,10 @@ function renderAnnual(){
     }
     const tr=document.createElement('tr');
     const nonNull=mVals.filter(v=>v!==null&&v>0);
+    const grpCatCount=(DB.groups[g]||[]).length;
     tr.innerHTML=`
-      <td style="padding-left:16px;color:var(--muted);font-size:12px">${g}</td>
-      <td>${cat}</td>
+      <td style="padding-left:16px;color:var(--muted);font-size:12px"></td>
+      <td>${grpCatCount>1?cat:''}</td>
       ${mVals.map((v,i)=>{
         const mk=`${year}-${String(months[i]).padStart(2,'0')}`;
         const hasData=v&&v>0;
@@ -1755,30 +1789,54 @@ function renderSettings(){
   const el=document.getElementById('keyword-by-group');
   if(!el)return;
 
-  // 구분별로 해당 카테고리에 매핑된 키워드 묶기
-  const html=Object.entries(DB.groups).map(([group, cats])=>{
-    // 이 그룹의 카테고리들에 매핑된 키워드 찾기
-    const keywords=Object.entries(DB.rules)
-      .filter(([kw,cat])=>cats.includes(cat))
-      .map(([kw,cat])=>({kw,cat}));
+  // DB.categories 순서 기준으로 그룹 정렬 (월별현황과 동일한 순서)
+  const groupOrder=[];
+  DB.categories.forEach(cat=>{
+    const grp=groupOf(cat);
+    if(grp&&!groupOrder.includes(grp))groupOrder.push(grp);
+  });
+  // DB.groups에 있지만 categories에 없는 그룹은 뒤에 추가
+  Object.keys(DB.groups).forEach(g=>{if(!groupOrder.includes(g))groupOrder.push(g);});
 
-    const chips=keywords.map(({kw,cat})=>`
-      <div style="display:inline-flex;align-items:center;gap:4px;background:#EAF0F8;border-radius:20px;padding:4px 10px;font-size:12px;margin:3px">
-        <span style="color:var(--muted);font-size:10px">${cat} →</span>
-        <span style="font-weight:600">${kw}</span>
-        <button onclick="deleteKeyword('${kw}')" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:13px;line-height:1;padding:0 0 0 2px">×</button>
-      </div>`).join('');
+  const html=groupOrder.map(group=>{
+    const cats=DB.groups[group]||[];
+    const catRows=cats.map(cat=>{
+      const keywords=Object.entries(DB.rules)
+        .filter(([kw,c])=>c===cat)
+        .map(([kw])=>kw);
+      const kwChips=keywords.map(kw=>`
+        <span style="display:inline-flex;align-items:center;gap:2px;background:#EAF0F8;border-radius:12px;padding:2px 8px;font-size:11px;margin:2px">
+          ${kw}
+          <button onclick="deleteKeyword('${kw}')" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:12px;line-height:1;padding:0 0 0 2px">×</button>
+        </span>`).join('');
+      return `
+        <div style="display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:7px 12px;border-bottom:1px solid var(--border)">
+          <span style="font-size:12px;font-weight:600;color:var(--navy2);min-width:130px">${cat}</span>
+          <div style="display:flex;flex-wrap:wrap;gap:2px;flex:1">${kwChips||'<span style="font-size:11px;color:var(--muted)">키워드 없음</span>'}</div>
+          <div style="display:flex;gap:4px;align-items:center;margin-left:auto">
+            <input type="text" id="kw2-${group}-${cat.replace(/[^a-zA-Z0-9가-힣]/g,'_')}" placeholder="키워드" style="width:90px;padding:3px 7px;border:1px solid var(--border);border-radius:5px;font-size:11px">
+            <button class="btn btn-gold btn-sm" style="font-size:11px;padding:3px 8px" onclick="addKwToCat('${group}','${cat}')">+ 추가</button>
+            ${cats.length>1?`<button onclick="deleteCatFromGroup('${group}','${cat}')" style="background:none;border:1px solid var(--border);border-radius:5px;cursor:pointer;color:var(--muted);font-size:11px;padding:3px 7px">항목삭제</button>`:''}
+          </div>
+        </div>`;
+    }).join('');
 
     return `
-      <div style="margin-bottom:20px">
-        <div style="font-size:13px;font-weight:700;color:var(--navy);margin-bottom:8px;padding-bottom:6px;border-bottom:2px solid var(--gold)">${group}</div>
-        <div style="margin-bottom:8px">${chips||'<span style="color:var(--muted);font-size:12px">키워드 없음</span>'}</div>
-        <div style="display:flex;gap:8px;align-items:center">
-          <input type="text" id="kw-input-${group}" placeholder="키워드 입력" style="width:140px;padding:5px 10px;border:1px solid var(--border);border-radius:6px;font-size:12px">
-          <select id="cat-select-${group}" style="width:160px;padding:5px 8px;border:1px solid var(--border);border-radius:6px;font-size:12px">
-            ${cats.map(c=>`<option value="${c}">${c}</option>`).join('')}
-          </select>
-          <button class="btn btn-gold btn-sm" onclick="addKeywordToGroup('${group}')">+ 추가</button>
+      <div style="margin-bottom:6px;border:1px solid var(--border);border-radius:6px;overflow:hidden">
+        <div onclick="toggleGroup('${group}')" style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--card);border-bottom:1px solid var(--border);cursor:pointer;user-select:none">
+          <span style="font-weight:700;font-size:13px;color:var(--text)">${group}</span>
+          <div style="display:flex;align-items:center;gap:10px">
+            <button onclick="event.stopPropagation();deleteGroup('${group}')" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:11px;padding:2px 6px;border:1px solid var(--border);border-radius:4px">삭제</button>
+            <span id="grp-arrow-${group}" style="font-size:12px;color:var(--muted)">▶</span>
+          </div>
+        </div>
+        <div id="grp-body-${group}" style="display:none">
+          ${catRows}
+          <div style="display:flex;gap:8px;align-items:center;padding:8px 12px;border-top:1px dashed var(--border)">
+            <span style="font-size:12px;color:var(--muted)">새 항목:</span>
+            <input type="text" id="newcat-input-${group}" placeholder="항목명 입력" style="width:130px;padding:4px 8px;border:1px solid var(--border);border-radius:5px;font-size:12px">
+            <button class="btn btn-gold btn-sm" onclick="addCatToGroup('${group}')">+ 추가</button>
+          </div>
         </div>
       </div>`;
   }).join('');
@@ -1786,11 +1844,80 @@ function renderSettings(){
   el.innerHTML=html;
 }
 
-function addKeywordToGroup(group){
-  const kw=document.getElementById(`kw-input-${group}`).value.trim();
-  const cat=document.getElementById(`cat-select-${group}`).value;
+function addCatToGroup(group){
+  const input=document.getElementById(`newcat-input-${group}`);
+  const newCat=input.value.trim();
+  if(!newCat)return alert('항목명을 입력해주세요.');
+  if(DB.groups[group].includes(newCat))return alert('이미 있는 항목이에요.');
+  DB.groups[group].push(newCat);
+  if(!DB.categories.includes(newCat)) DB.categories.push(newCat);
+  saveDB(null,null);
+  renderSettings();
+  // 추가한 그룹 펼쳐서 보여주기
+  const b=document.getElementById(`grp-body-${group}`);
+  const a=document.getElementById(`grp-arrow-${group}`);
+  if(b){b.style.display='block';}
+  if(a){a.textContent='▼';}
+}
+
+function deleteCatFromGroup(group, cat){
+  if(!confirm(`'${cat}' 항목을 삭제할까요?\n이 항목으로 저장된 거래 데이터는 기타사용으로 처리됩니다.`))return;
+  DB.groups[group]=DB.groups[group].filter(c=>c!==cat);
+  DB.categories=DB.categories.filter(c=>c!==cat);
+  // 해당 카테고리로 매핑된 키워드도 제거
+  Object.keys(DB.rules).forEach(kw=>{if(DB.rules[kw]===cat)delete DB.rules[kw];});
+  saveDB(null,null);
+  renderSettings();
+}
+
+function deleteGroup(group){
+  if(!confirm(`'${group}' 구분을 삭제할까요?\n포함된 모든 항목과 키워드 규칙도 함께 삭제됩니다.`))return;
+  const cats=DB.groups[group]||[];
+  // 해당 그룹 카테고리 제거
+  DB.categories=DB.categories.filter(c=>!cats.includes(c));
+  // 해당 카테고리 키워드 제거
+  Object.keys(DB.rules).forEach(kw=>{if(cats.includes(DB.rules[kw]))delete DB.rules[kw];});
+  delete DB.groups[group];
+  saveDB(null,null);
+  renderSettings();
+}
+
+function toggleGroup(group){
+  const body=document.getElementById(`grp-body-${group}`);
+  const arrow=document.getElementById(`grp-arrow-${group}`);
+  if(!body)return;
+  const isOpen=body.style.display!=='none';
+  body.style.display=isOpen?'none':'block';
+  arrow.textContent=isOpen?'▶':'▼';
+}
+
+function addKwToCat(group, cat){
+  const safeId=cat.replace(/[^a-zA-Z0-9가-힣]/g,'_');
+  const input=document.getElementById(`kw2-${group}-${safeId}`);
+  if(!input)return;
+  const kw=input.value.trim();
   if(!kw)return alert('키워드를 입력해주세요.');
   DB.rules[kw]=cat;
+  saveDB(null,null);
+  // 열린 상태 기억
+  const openGroups=Array.from(document.querySelectorAll('[id^="grp-body-"]'))
+    .filter(el=>el.style.display!=='none')
+    .map(el=>el.id.replace('grp-body-',''));
+  renderSettings();
+  openGroups.forEach(g=>{
+    const b=document.getElementById(`grp-body-${g}`);
+    const a=document.getElementById(`grp-arrow-${g}`);
+    if(b){b.style.display='block';}
+    if(a){a.textContent='▼';}
+  });
+}
+
+function addKeywordToGroup(group){
+  const kw=document.getElementById(`kw-input-${group}`);
+  const cat=document.getElementById(`cat-select-${group}`);
+  if(!kw||!cat)return;
+  if(!kw.value.trim())return alert('키워드를 입력해주세요.');
+  DB.rules[kw.value.trim()]=cat.value;
   saveDB(null,null);
   renderSettings();
 }
@@ -1872,14 +1999,25 @@ async function editSavedMonth(mk){
     const grpOptsEdit='<option value="">-- 미분류 --</option>'+
       Object.keys(DB.groups).filter(g=>g!=='계좌간대체').map(g=>`<option value="${g}">${g}</option>`).join('');
     const rows=uncats.map((t,i)=>{
+      const tidx=txns.indexOf(t);
       const curGrp=groupOf(t.cat)||'';
+      const curCat=t.cat||'';
       const selOpts=grpOptsEdit.replace(`value="${curGrp}"`,`value="${curGrp}" selected`);
+      const grpCats=DB.groups[curGrp]||[];
+      const catSel2=curGrp&&grpCats.length>1
+        ?`<select id="editcat2-${tidx}" onchange="updateCatByGroupCat(this,${tidx},this.value)" style="width:100%;padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;margin-top:4px">
+            ${grpCats.map(c=>`<option value="${c}" ${c===curCat?'selected':''}>${c}</option>`).join('')}
+          </select>`
+        :'';
       return `<tr>
         <td style="font-size:12px;color:var(--muted)">${t.date?t.date.slice(5):''}</td>
         <td style="font-size:13px">${t.memo||'-'}</td>
-        <td><select onchange="updateCatByGroup(this,${txns.indexOf(t)})" style="width:100%;padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:#FFF3E0">
-          ${selOpts}
-        </select></td>
+        <td>
+          <select onchange="updateCatByGroup(this,${tidx})" style="width:100%;padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:#FFF3E0">
+            ${selOpts}
+          </select>
+          ${catSel2}
+        </td>
         <td class="amount">${fmt(t.out)}</td>
       </tr>`;}).join('');
 
@@ -2076,6 +2214,11 @@ async function saveAccountConfig(){
 window.savePrevBal = savePrevBal;
 window.renderSettings = renderSettings;
 window.addKeywordToGroup = addKeywordToGroup;
+window.addCatToGroup = addCatToGroup;
+window.deleteCatFromGroup = deleteCatFromGroup;
+window.toggleGroup = toggleGroup;
+window.addKwToCat = addKwToCat;
+window.deleteGroup = deleteGroup;
 window.deleteKeyword = deleteKeyword;
 window.refreshSavedMonths = refreshSavedMonths;
 window.deleteMonthData = deleteMonthData;
