@@ -1389,7 +1389,7 @@ function renderMonthly(){
     const g=groupOf(cat);
     const val=(rawData[cat])||0;
     const prevVal=(prev&&prev[cat])||0;
-    if(!val&&!prevVal)return;
+    if(!val)return;
     if(g!==lastGroup){
       const groupSum=allCats().filter(c=>groupOf(c)===g).reduce((s,c)=>s+(data[c]||0),0);
       const gid='grp-'+groupIdx++;
