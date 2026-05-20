@@ -801,40 +801,41 @@ async function saveTxnChanges(){
 async function recalcMonthSummary(mk, txns){
   const prevMeta=(DB.monthly[mk]&&DB.monthly[mk]._meta)||{};
   const summary={};
-  let expenseTotalOut=0, incomeTotalOut=0, totalIn=0;
-  let outLastBal=prevMeta.outLastBal||0, inLastBal=prevMeta.inLastBal||0;
-  let outGasugumIn=0, gasugumIn=0;
+  let expenseTotalOut=0;
+  let outGasugumIn=0;
 
+  // ★ 잔액/입금계좌 관련값은 XLS 업로드 시 딱 한 번만 설정되는 고정값
+  //   recalcMonthSummary에서는 절대 재계산하지 않고 prevMeta 값을 그대로 보존
+  const outLastBal     = prevMeta.outLastBal   || 0;
+  const inLastBal      = prevMeta.inLastBal    || 0;
+  const lastBal        = prevMeta.lastBal      || 0;
+  const totalIn        = prevMeta.totalIn      || 0;
+  const incomeTotalOut = prevMeta.incomeTotalOut || 0;
+  const gasugumIn      = prevMeta.gasugumIn    || 0;
+
+  // 입금계좌 summary 항목도 prevMeta에서 복원 (수입, 환불 등)
+  const prevData=DB.monthly[mk]||{};
+  Object.entries(prevData).forEach(([k,v])=>{
+    if(k.startsWith('_')||typeof v!=='number'||v<=0)return;
+    if(k==='수입'||k==='가수금입금') summary[k]=v;
+  });
+
+  // 출금계좌 거래만 재계산 (카테고리 분류 변경 반영)
   txns.forEach(t=>{
     if(!t.isIncome){
-      // 출금계좌
       if(t.out>0){
         const cat=t.cat||'기타사용';
         summary[cat]=(summary[cat]||0)+t.out;
         if(cat!=='계좌간대체') expenseTotalOut+=t.out;
       }
       if(t.inp>0&&t.cat==='가수금입금'){
-        totalIn+=t.inp; outGasugumIn+=t.inp;
+        outGasugumIn+=t.inp;
         summary['가수금입금']=(summary['가수금입금']||0)+t.inp;
       }
-      if(t.bal) outLastBal=Math.max(outLastBal, t.bal);
-    } else {
-      // 입금계좌
-      if(t.inp>0&&t.cat!=='계좌간대체') totalIn+=t.inp;
-      if(t.inp>0&&t.cat==='가수금입금') gasugumIn+=t.inp;
-      if(t.out>0){
-        const cat=t.cat||'기타사용';
-        if(cat!=='계좌간대체'){
-          summary[cat]=(summary[cat]||0)+t.out;
-          incomeTotalOut+=t.out;
-        }
-      }
-      if(t.bal) inLastBal=Math.max(inLastBal, t.bal);
     }
   });
-  gasugumIn+=outGasugumIn;
+
   const totalOut=expenseTotalOut+incomeTotalOut;
-  const lastBal=outLastBal+inLastBal;
   const monthData=Object.assign({},summary,{_meta:{totalOut,expenseTotalOut,incomeTotalOut,totalIn,gasugumIn,lastBal,outLastBal,inLastBal,savedAt:new Date().toISOString()}});
   await setDoc(doc(fsDB,'monthly',mk),monthData);
   DB.monthly[mk]=monthData;
@@ -918,8 +919,31 @@ function handleFiles(files){
         else if(isIncomeFile) isIncome=true;
         else if(isExpenseFile) isIncome=false;
         else{
+          // 파일 내 거래 패턴으로 판단: 입금합계 > 출금합계이면 입금계좌
           const firstRow=String((rows[0]&&rows[0][0])||'');
-          isIncome=firstRow.includes('입금계좌');
+          if(firstRow.includes('입금계좌')) isIncome=true;
+          else if(firstRow.includes('출금계좌')) isIncome=false;
+          else{
+            // 헤더 찾아서 입금/출금 합계 비교
+            let hRow=-1;
+            for(let ri=0;ri<rows.length;ri++){
+              if(rows[ri].some(c=>String(c).includes('거래일시'))){hRow=ri;break;}
+            }
+            if(hRow>=0){
+              const hdrs=rows[hRow].map(c=>String(c).trim());
+              const iO=hdrs.findIndex(h=>h.includes('출금액'));
+              const iI=hdrs.findIndex(h=>h.includes('입금액'));
+              let sumOut=0,sumIn=0;
+              for(let ri=hRow+1;ri<rows.length;ri++){
+                sumOut+=Number(String(rows[ri][iO]||0).replace(/,/g,''))||0;
+                sumIn+=Number(String(rows[ri][iI]||0).replace(/,/g,''))||0;
+              }
+              isIncome=sumIn>sumOut;
+              console.log(`[자동판별] sumIn=${sumIn}, sumOut=${sumOut}, isIncome=${isIncome}`);
+            } else {
+              isIncome=false;
+            }
+          }
         }
         console.log(`[시트:${sheetName}] 계좌번호=${acctNum}, isIncome=${isIncome}`);
         // 시트명에서 월 번호 추출 (예: '1월' → 1, '2월' → 2)
@@ -1016,7 +1040,7 @@ function parseStatement(rows, isIncome, sheetMonth=null){
       } else {
         // 출금계좌 출금: 계좌간대체 차단 (실제 지출 - 외부로 나가는 돈)
         const matched=matchCategory(memo,sender);
-        cat=(matched==='계좌간대체')?null:matched;
+        cat=(matched==='계좌간대체'||!matched)?'기타사용':matched;
       }
     }
     const rawDate=String(r[iDate]);
@@ -1222,9 +1246,8 @@ function renderUploadResult(txns, monthKey, inTxns){
   document.getElementById('upload-month').style.display='';
 
   // 미분류 체크
-  const uncats=txns.filter(t=>!t.cat&&t.out>0);
-  document.getElementById('uncat-badge').textContent=uncats.length+'건 미분류';
-  document.getElementById('uncat-badge').style.display=uncats.length?'inline-block':'none';
+  // 기타사용이 기본값이므로 미분류 배지 미사용
+  document.getElementById('uncat-badge').style.display='none';
 
   // 수입/지출/잔액 계산
   const totalOut=txns.reduce((s,t)=>s+t.out,0);
@@ -1235,8 +1258,8 @@ function renderUploadResult(txns, monthKey, inTxns){
   // Alert + 요약 카드
   const alertArea=document.getElementById('alert-area');
   alertArea.innerHTML=`
-    ${uncats.length>0
-      ?`<div class="alert alert-warn">⚠️ ${uncats.length}건 미분류 — 아래 표에서 카테고리를 선택해주세요.</div>`
+    ${false
+      ?`<div class="alert alert-warn">⚠️ 미분류</div>`
       :`<div class="alert alert-success">✅ 모든 거래 자동 분류 완료</div>`}
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:4px">
       <div style="background:#EAFAF1;border-radius:8px;padding:12px;text-align:center">
@@ -1270,15 +1293,18 @@ function renderUploadResult(txns, monthKey, inTxns){
   txns.forEach((t,i)=>{
     const tr=document.createElement('tr');
     tr.className='match-row';
-    const isUncat=!t.cat&&t.out>0;
     const isIncome=t.inp>0;
     const badge=isIncome
       ?`<span class="badge badge-skip">입금</span>`
-      :t.cat?`<span class="badge badge-auto">자동</span>`
+      :t.cat&&t.cat!=='기타사용'?`<span class="badge badge-auto">자동</span>`
+      :t.cat==='기타사용'?`<span class="badge badge-manual">수동</span>`
       :`<span class="badge badge-manual">수동</span>`;
     // 현재 카테고리의 그룹 찾기
-    const curGroup=groupOf(t.cat)||'';
+    const curGroup=groupOf(t.cat)||'기타지출';
     const selOpts=grpOpts.replace(`value="${curGroup}"`,`value="${curGroup}" selected`);
+    // 세부 카테고리 드롭다운 옵션
+    const curCats=DB.groups[curGroup]||[];
+    const catOpts=curCats.map(c=>`<option value="${c}"${c===t.cat?' selected':''}>${c}</option>`).join('');
     tr.innerHTML=`
       <td>${badge}</td>
       <td style="color:var(--muted);font-size:12px">${t.date.slice(5)}</td>
@@ -1288,11 +1314,16 @@ function renderUploadResult(txns, monthKey, inTxns){
       </td>
       <td>${isIncome
         ?`<span style="color:var(--green);font-size:12px">입금</span>`
-        :`<select onchange="updateCatByGroup(this,${i})" style="width:100%;padding:5px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:${isUncat?'#FFF3E0':'#fff'}">
-            ${selOpts}
-          </select>`}
+        :`<div style="display:flex;flex-direction:column;gap:3px">
+            <select onchange="updateCatByGroup(this,${i})" style="width:100%;padding:4px 6px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:#fff">
+              ${selOpts}
+            </select>
+            <select id="editcat2-${i}" onchange="updateCatByGroupCat(this,${i},this.value)" style="width:100%;padding:4px 6px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:#f8f8f8">
+              ${catOpts}
+            </select>
+          </div>`}
       </td>
-      <td class="amount" style="color:${isIncome?'var(--green)':isUncat?'var(--red)':'var(--text)'}">
+      <td class="amount" style="color:${isIncome?'var(--green)':'var(--text)'}">
         ${isIncome?'+'+fmt(t.inp):t.out>0?fmt(t.out):'-'}
       </td>`;
     tbody.appendChild(tr);
@@ -1769,6 +1800,19 @@ function renderMonthly(){
       tbody.appendChild(tr);
       lastGroup=g;
     }
+    // 하위 카테고리가 1개뿐인 그룹은 상세행 생략 (그룹행과 중복)
+    const visibleCatCountForRow=allCats().filter(c=>groupOf(c)===g&&c!=='가수금입금'&&(rawData[c]||0)>0).length;
+    if(visibleCatCountForRow<=1){
+      // 그룹행에 클릭 이벤트만 추가 (세부내역 모달)
+      const grpRow=tbody.lastElementChild;
+      if(grpRow&&grpRow.classList.contains('cat-group')){
+        const currentKey=`${year}-${String(month).padStart(2,'0')}`;
+        grpRow.style.cursor='pointer';
+        grpRow.title='클릭하면 세부 내역 확인';
+        grpRow.onclick=()=>openCatModal(cat, currentKey);
+      }
+      return;
+    }
     const d=val-prevVal;
     const tr=document.createElement('tr');
     tr.setAttribute('data-group','grp-'+(groupIdx-1));
@@ -2108,6 +2152,7 @@ function renderAnnual(){
   allCats().forEach(cat=>{
     const g=groupOf(cat);
     if(g==='가수금')return; // 가수금은 맨 아래 별도 표시
+    if(g==='계좌간대체')return; // 계좌간대체 숨김
     const mVals=months.map((_,i)=>monthData[i]?monthData[i][cat]||0:null);
     const total=mVals.reduce((s,v)=>s+(v||0),0);
     if(!total)return;
