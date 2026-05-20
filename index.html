@@ -593,23 +593,14 @@ async function loadDB(){
           Object.entries(cfg.userGroups).forEach(([g,cats])=>{fg[fixStr(g)]=cats.map(fixStr);});
           // GROUPS의 새 항목을 Firestore groups에 병합
           Object.entries(GROUPS).forEach(([g,defaultCats])=>{
-            if(fg[g]){
-              defaultCats.forEach(c=>{
-                if(!fg[g].includes(c)){
-                  fg[g].push(c);
-                  // DB.categories에도 같은 그룹 마지막 위치에 삽입
-                  const grpCats=fg[g];
-                  let insertIdx=-1;
-                  for(let i=DB.categories.length-1;i>=0;i--){
-                    if(grpCats.includes(DB.categories[i])){insertIdx=i+1;break;}
-                  }
-                  if(insertIdx>=0&&!DB.categories.includes(c)) DB.categories.splice(insertIdx,0,c);
-                  else if(!DB.categories.includes(c)) DB.categories.push(c);
-                }
-              });
-            } else {
+            if(!fg[g]){
+              // 코드에 새로 추가된 그룹만 추가 (기존 그룹은 사용자 설정 그대로)
               fg[g]=[...defaultCats];
+              defaultCats.forEach(c=>{
+                if(!DB.categories.includes(c)) DB.categories.push(c);
+              });
             }
+            // 기존 그룹은 건드리지 않음 → 병합/삭제한 카테고리 복원 방지
           });
           DB.groups=fg;
           // GROUPS 상수 순서 기준으로 categories 재정렬 (급여→임대료→... 원래 순서)
@@ -1776,15 +1767,15 @@ function renderMonthly(){
     const val=(rawData[cat])||0;
     const prevVal=(prev&&prev[cat])||0;
     if(!val)return;
+    const visibleCatCount=allCats().filter(c=>groupOf(c)===g&&c!=='가수금입금'&&(rawData[c]||0)>0).length;
     if(g!==lastGroup){
       const groupSum=allCats().filter(c=>groupOf(c)===g).reduce((s,c)=>s+(data[c]||0),0);
-      // 당월 값 있는 하위항목 수
-      const visibleCatCount=allCats().filter(c=>groupOf(c)===g&&c!=='가수금입금'&&(rawData[c]||0)>0).length;
       const gid='grp-'+groupIdx++;
       const tr=document.createElement('tr');
       tr.className='cat-group';
       tr.setAttribute('data-gid',gid);
       tr.setAttribute('data-open','1');
+      const currentKey=`${year}-${String(month).padStart(2,'0')}`;
       if(visibleCatCount>1){
         tr.style.cursor='pointer';
         tr.onclick=function(){
@@ -1794,25 +1785,20 @@ function renderMonthly(){
           this.querySelector('.toggle-icon').textContent=isOpen?'▶':'▼';
           this.setAttribute('data-open',isOpen?'0':'1');
         };
+      } else {
+        // 하위 카테고리 1개뿐 → 그룹행 클릭 시 바로 세부내역 모달
+        tr.style.cursor='pointer';
+        tr.title='클릭하면 세부 내역 확인';
+        const _cat=cat;
+        tr.onclick=()=>openCatModal(_cat, currentKey);
       }
-      const arrowHtml=visibleCatCount>1?`<span class="toggle-icon" style="margin-right:6px;font-size:10px">▼</span>`:'';
-      tr.innerHTML=`<td colspan="2">${arrowHtml}<b>${g}</b></td><td class="amount" style="text-align:right">${fmt(groupSum)}</td><td style="text-align:right">${pct(groupSum,totalOut)}</td><td></td>`;
+      const arrowHtml=visibleCatCount>1?`<span class="toggle-icon" style="margin-right:6px;font-size:10px">▼</span>`:'<span style="margin-right:6px;font-size:10px;color:var(--gold)">↗</span>';
+      tr.innerHTML=`<td colspan="2">${arrowHtml}<b>${g}</b></td><td class="amount" style="text-align:right;cursor:pointer">${fmt(groupSum)}</td><td style="text-align:right">${pct(groupSum,totalOut)}</td><td></td>`;
       tbody.appendChild(tr);
       lastGroup=g;
     }
-    // 하위 카테고리가 1개뿐인 그룹은 상세행 생략 (그룹행과 중복)
-    const visibleCatCountForRow=allCats().filter(c=>groupOf(c)===g&&c!=='가수금입금'&&(rawData[c]||0)>0).length;
-    if(visibleCatCountForRow<=1){
-      // 그룹행에 클릭 이벤트만 추가 (세부내역 모달)
-      const grpRow=tbody.lastElementChild;
-      if(grpRow&&grpRow.classList.contains('cat-group')){
-        const currentKey=`${year}-${String(month).padStart(2,'0')}`;
-        grpRow.style.cursor='pointer';
-        grpRow.title='클릭하면 세부 내역 확인';
-        grpRow.onclick=()=>openCatModal(cat, currentKey);
-      }
-      return;
-    }
+    // 하위 카테고리가 1개뿐인 그룹은 상세행 생략
+    if(visibleCatCount<=1) return;
     const d=val-prevVal;
     const tr=document.createElement('tr');
     tr.setAttribute('data-group','grp-'+(groupIdx-1));
@@ -2175,8 +2161,16 @@ function renderAnnual(){
           if(arr)arr.textContent=open?'▶':'▼';
         };
       }
-      const arrowHtml=grpCatCnt>1?`<span class="ag-arrow" style="margin-right:4px;font-size:10px">▼</span>`:'';
-      tr.innerHTML=`<td colspan="2" style="position:sticky;left:0;z-index:1;background:var(--card);box-shadow:2px 0 4px rgba(0,0,0,.08);white-space:nowrap">${arrowHtml}<b>${g}</b></td>${grpTotals.map(v=>`<td class="amount" style="white-space:nowrap">${v?fmtMan(v):'-'}</td>`).join('')}<td class="amount" style="white-space:nowrap">${fmt(grpTotal)}</td><td class="amount" style="white-space:nowrap">${grpTotal?fmt(grpTotal/validTotals.length):'-'}</td>`;
+      const arrowHtml=grpCatCnt>1?`<span class="ag-arrow" style="margin-right:4px;font-size:10px">▼</span>`:'<span style="margin-right:4px;font-size:10px;color:var(--gold)">↗</span>';
+      // 단일 카테고리 그룹: 월별 셀에 직접 클릭 이벤트 추가
+      const grpMonthlyCells=grpTotals.map((v,i)=>{
+        const mk=`${year}-${String(months[i]).padStart(2,'0')}`;
+        if(grpCatCnt<=1&&v&&v>0){
+          return `<td class="amount" style="white-space:nowrap"><span style="cursor:pointer;color:var(--navy2);text-decoration:underline;text-underline-offset:2px" onclick="openCatModal('${cat}','${mk}')">${fmtMan(v)}</span></td>`;
+        }
+        return `<td class="amount" style="white-space:nowrap">${v?fmtMan(v):'-'}</td>`;
+      }).join('');
+      tr.innerHTML=`<td colspan="2" style="position:sticky;left:0;z-index:1;background:var(--card);box-shadow:2px 0 4px rgba(0,0,0,.08);white-space:nowrap">${arrowHtml}<b>${g}</b></td>${grpMonthlyCells}<td class="amount" style="white-space:nowrap">${fmt(grpTotal)}</td><td class="amount" style="white-space:nowrap">${grpTotal?fmt(grpTotal/validTotals.length):'-'}</td>`;
       tbody.appendChild(tr);
       lastGrp=g;
     }
@@ -2405,6 +2399,8 @@ function showMergePicker(group, fromCat){
 async function mergeCat(group, fromCat, toCat){
   if(!confirm(`'${fromCat}' → '${toCat}'으로 병합할까요?\n모든 월별 데이터에서 합산됩니다.`))return;
   showLoading('병합 중...');
+
+  // 1) monthly 집계 업데이트
   for(const [mk, data] of Object.entries(DB.monthly)){
     if(data[fromCat]){
       const updated=Object.assign({},data);
@@ -2414,6 +2410,21 @@ async function mergeCat(group, fromCat, toCat){
       await saveDB(mk, updated);
     }
   }
+
+  // 2) transactions 개별 거래내역도 업데이트 (fromCat → toCat)
+  const txnKeys=Object.keys(DB.monthly);
+  for(const mk of txnKeys){
+    try{
+      const txnDoc=await getDoc(doc(fsDB,'transactions',mk));
+      if(!txnDoc.exists())continue;
+      const d=txnDoc.data();
+      const txns=d.txns?JSON.parse(d.txns):(d.list||[]);
+      let changed=false;
+      txns.forEach(t=>{if(t.cat===fromCat){t.cat=toCat;changed=true;}});
+      if(changed) await setDoc(doc(fsDB,'transactions',mk),{txns:JSON.stringify(txns)});
+    }catch(e){console.warn('transactions 업데이트 실패:',mk,e);}
+  }
+
   DB.groups[group]=DB.groups[group].filter(c=>c!==fromCat);
   DB.categories=DB.categories.filter(c=>c!==fromCat);
   Object.keys(DB.rules).forEach(kw=>{if(DB.rules[kw]===fromCat) DB.rules[kw]=toCat;});
