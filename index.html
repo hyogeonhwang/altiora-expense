@@ -119,6 +119,21 @@ hr{border:none;border-top:1px solid var(--border);margin:16px 0}
 </style>
 </head>
 <body>
+<script>
+(function(){
+  const t=sessionStorage.getItem('activeTab');
+  if(t&&t!=='upload'){
+    document.addEventListener('DOMContentLoaded',function(){
+      document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+      const btn=document.querySelector('.nav-btn[data-tab="'+t+'"]');
+      if(btn)btn.classList.add('active');
+      document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
+      const panel=document.getElementById('tab-'+t);
+      if(panel)panel.classList.add('active');
+    });
+  }
+})();
+</script>
 
 <div id="loading-overlay" class="loading-overlay">
   <div class="loading-spinner"></div>
@@ -519,9 +534,55 @@ async function loadDB(){
       const cfgSnap = await getDoc(doc(fsDB,'config','settings'));
       if(cfgSnap.exists()){
         const cfg=cfgSnap.data();
-        if(cfg.userRules) DB.rules=Object.assign({},DEFAULT_RULES,cfg.userRules);
-        if(cfg.userCategories) DB.categories=cfg.userCategories;
-        if(cfg.userGroups) DB.groups=cfg.userGroups;
+        const fixStr=s=>typeof s==='string'?s.replace(/&amp;/g,'&').replace(/&#39;/g,"'").replace(/&quot;/g,'"'):s;
+        if(cfg.userRules){
+          const fr={};Object.entries(cfg.userRules).forEach(([k,v])=>{fr[fixStr(k)]=fixStr(v);});
+          DB.rules=Object.assign({},DEFAULT_RULES,fr);
+        }
+        if(cfg.userCategories) DB.categories=cfg.userCategories.map(fixStr);
+        if(cfg.userGroups){
+          // Firestore 로드 + HTML 엔티티 정규화
+          const fg={};
+          Object.entries(cfg.userGroups).forEach(([g,cats])=>{fg[fixStr(g)]=cats.map(fixStr);});
+          // DEFAULT_GROUPS의 새 항목을 Firestore groups에 병합
+          Object.entries(DEFAULT_GROUPS).forEach(([g,defaultCats])=>{
+            if(fg[g]){
+              defaultCats.forEach(c=>{
+                if(!fg[g].includes(c)){
+                  fg[g].push(c);
+                  // DB.categories에도 같은 그룹 마지막 위치에 삽입
+                  const grpCats=fg[g];
+                  let insertIdx=-1;
+                  for(let i=DB.categories.length-1;i>=0;i--){
+                    if(grpCats.includes(DB.categories[i])){insertIdx=i+1;break;}
+                  }
+                  if(insertIdx>=0&&!DB.categories.includes(c)) DB.categories.splice(insertIdx,0,c);
+                  else if(!DB.categories.includes(c)) DB.categories.push(c);
+                }
+              });
+            } else {
+              fg[g]=[...defaultCats];
+            }
+          });
+          DB.groups=fg;
+          // DB.categories를 DB.groups 순서에 맞게 재정렬
+          const reordered=[];
+          const used=new Set();
+          Object.values(fg).forEach(cats=>cats.forEach(c=>{
+            if(!used.has(c)){reordered.push(c);used.add(c);}
+          }));
+          DB.categories.forEach(c=>{if(!used.has(c)){reordered.push(c);used.add(c);}});
+          DB.categories=reordered;
+          // 병합된 내용 Firestore에 저장 (다음 로드 시도 병합 불필요하게)
+          try{
+            await setDoc(doc(fsDB,'config','settings'),{
+              userRules:DB.rules, userCategories:DB.categories,
+              userGroups:DB.groups,
+              incomeAccount:cfg.incomeAccount||'',
+              expenseAccount:cfg.expenseAccount||''
+            });
+          }catch(e){console.error('config 업데이트 오류:',e);}
+        }
         if(!DB.config) DB.config={};
         DB.config.incomeAccount=cfg.incomeAccount||'';
         DB.config.expenseAccount=cfg.expenseAccount||'';
@@ -561,7 +622,7 @@ async function saveDB(key, data, txns){
   }
 }
 function allCats(){return DB.categories}
-function groupOf(cat){for(const[g,cs]of Object.entries(DB.groups))if(cs.includes(cat))return g;return '기타'}
+function groupOf(cat){for(const[g,cs]of Object.entries(DB.groups))if(cs.includes(cat))return g;return '기타지출'}
 
 // ============================================================
 // HELPERS
@@ -729,9 +790,19 @@ function parseStatement(rows, isIncome, sheetMonth=null){
         cat=matchCategory(memo,sender);
       }
     } else {
-      cat=matchCategory(memo,sender);
+      if(inp>0){
+        // 출금계좌로 들어오는 입금: 황효건이면 가수금입금, 나머지는 계좌간대체
+        const matched=matchCategory(memo,sender);
+        const isHwang=normalizeStr(memo+' '+sender).includes('황효건');
+        if(matched==='가수금'||isHwang) cat='가수금입금';
+        else cat='계좌간대체';
+      } else {
+        cat=matchCategory(memo,sender);
+      }
     }
-    const dateStr=String(r[iDate]).slice(0,10).replace(/\./g,'-');
+    const rawDate=String(r[iDate]);
+    const dateStr=rawDate.slice(0,10).replace(/\./g,'-');
+    const dateTimeStr=rawDate.replace(/\./g,'-').slice(0,19); // 정렬용 전체 datetime
     // 시트명 월 필터: 지정된 월의 데이터만 처리 (중복 방지)
     if(sheetMonth){
       const rowMonth=parseInt(dateStr.slice(5,7));
@@ -739,6 +810,7 @@ function parseStatement(rows, isIncome, sheetMonth=null){
     }
     txns.push({
       date:dateStr,
+      dateTime:dateTimeStr,
       memo:memo||sender, rawMemo:memo, rawSender:sender,
       out, inp,
       bal:Number(String(r[iBal]||0).replace(/,/g,''))||0,
@@ -746,6 +818,8 @@ function parseStatement(rows, isIncome, sheetMonth=null){
       matchType:cat?(memo&&matchCategory(memo,''))?'memo':'sender':'uncat'
     });
   }
+  // 날짜+시간 기준 오름차순 정렬 → 마지막 처리 거래 = 최신 거래 = 월말 잔액
+  txns.sort((a,b)=>(a.dateTime||a.date).localeCompare(b.dateTime||b.date));
   return txns;
 }
 
@@ -1101,19 +1175,23 @@ async function saveEditedMonth(mk){
   const txns=window._multiMonthTxns[mk]||[];
   const prevMeta=(DB.monthly[mk]&&DB.monthly[mk]._meta)||{};
   const summary={};
-  let totalOut=0,outLastBal=0;
+  let totalOut=0,outLastBal=0,outGasugumIn=0;
   txns.forEach(t=>{
     if(t.out>0){
       const cat=t.cat||'기타사용';
       summary[cat]=(summary[cat]||0)+t.out;
       if(cat!=='계좌간대체') totalOut+=t.out;
     }
+    if(t.inp>0&&t.cat==='가수금입금'){
+      outGasugumIn+=t.inp;
+      summary['가수금입금']=(summary['가수금입금']||0)+t.inp;
+    }
     if(t.bal)outLastBal=t.bal;
   });
-  // 입금계좌 데이터 보존
   const inLastBal=prevMeta.inLastBal||0;
-  const totalIn=prevMeta.totalIn||0;
-  const gasugumIn=prevMeta.gasugumIn||0;
+  const prevIncomePortion=(prevMeta.totalIn||0)-(prevMeta.gasugumIn||0);
+  const totalIn=prevIncomePortion+outGasugumIn;
+  const gasugumIn=outGasugumIn>0?outGasugumIn:(prevMeta.gasugumIn||0);
   const lastBal=outLastBal+inLastBal;
   const monthData=Object.assign({},summary,{_meta:{
     totalOut,totalIn,gasugumIn,lastBal,outLastBal,inLastBal,
@@ -1148,15 +1226,22 @@ async function saveMonth(){
   let totalOut=0, totalIn=0, outLastBal=0, inLastBal=0;
   // 수정 후 저장 시 inTxns가 비어있으면 기존 저장된 입금계좌 데이터 보존
   const prevMetaForSave=(DB.monthly[key]&&DB.monthly[key]._meta)||{};
+  let outGasugumIn=0;
   txns.forEach(t=>{
     if(t.out>0){
       const cat=t.cat||'기타사용';
       summary[cat]=(summary[cat]||0)+t.out;
       if(cat!=='계좌간대체') totalOut+=t.out;
     }
+    // 출금계좌로 황효건이 입금한 경우 = 가수금입금
+    if(t.inp>0&&t.cat==='가수금입금'){
+      totalIn+=t.inp;
+      outGasugumIn+=t.inp;
+      summary['가수금입금']=(summary['가수금입금']||0)+t.inp;
+    }
     if(t.bal)outLastBal=t.bal;
   });
-  let gasugumIn=0;
+  let gasugumIn=outGasugumIn;
   inTxns.forEach(t=>{
     if(t.inp>0&&t.cat!=='계좌간대체') totalIn+=t.inp; // 계좌간대체 수신 제외
     if(t.inp>0&&t.cat==='가수금입금') gasugumIn+=t.inp;
@@ -1169,11 +1254,14 @@ async function saveMonth(){
     }
     if(t.bal)inLastBal=t.bal;
   });
-  // inTxns가 비어있으면(수정 후 저장) 기존 저장된 입금계좌 값 보존
+  // inTxns가 비어있으면(출금파일만 업로드) 기존 입금계좌 값 보존
+  // 단, outTxns에서 나온 가수금입금은 새로 계산한 값 사용
   if(inTxns.length===0){
     inLastBal=prevMetaForSave.inLastBal||0;
-    totalIn=prevMetaForSave.totalIn||0;
-    gasugumIn=prevMetaForSave.gasugumIn||0;
+    // 이전 totalIn에서 이전 gasugumIn 제거 후 새 outGasugumIn 추가
+    const prevIncomePortion=(prevMetaForSave.totalIn||0)-(prevMetaForSave.gasugumIn||0);
+    totalIn=prevIncomePortion+outGasugumIn;
+    gasugumIn=outGasugumIn>0?outGasugumIn:(prevMetaForSave.gasugumIn||0);
   }
   const lastBal=outLastBal+inLastBal;
   const monthData=Object.assign({},summary,{_meta:{totalOut,totalIn,gasugumIn,lastBal,outLastBal,inLastBal,savedAt:new Date().toISOString()}});
@@ -1335,7 +1423,7 @@ function renderMonthly(){
         </div>
       </div>
       <div style="background:${balOk?'#EAFAF1':'#FEF9E7'};border-radius:8px;padding:12px 16px;font-size:13px;margin-bottom:10px">
-        <div style="font-weight:700;margin-bottom:6px">${balOk?'✅':'⚠️'} 잔액 검증</div>
+        <div style="font-weight:700;margin-bottom:6px">${balOk?'✅':'⚠️'} 잔액 검증 <span style="font-size:11px;font-weight:400;color:var(--muted)">(전월말+수입-지출 = 실제잔액 확인)</span></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--muted);line-height:2">
           <span>전월말(2계좌) <b style="color:var(--text)">${fmt(prevBal)}</b></span>
           <span>＋</span>
@@ -1347,7 +1435,7 @@ function renderMonthly(){
           <span style="margin-left:8px">실제잔액 <b style="color:var(--navy)">${fmt(actualBal)}</b>
             ${(meta.outLastBal||meta.inLastBal)?`<span style="font-size:11px;color:var(--muted);margin-left:4px">(출금 ${fmt(meta.outLastBal||0)} + 입금 ${fmt(meta.inLastBal||0)})</span>`:'<span style="font-size:11px;color:var(--red);margin-left:4px">⚠ 재업로드 필요</span>'}
           </span>
-          ${!balOk?`<span style="color:var(--red);font-weight:600">차이 ${fmt(Math.abs(balDiff))} → 확인 필요</span>`:'<span style="color:var(--green)">✅ 일치</span>'}
+          ${!balOk?`<span style="color:var(--red);font-weight:600;cursor:pointer" onclick="showBalDiffDetail('${key}',${balDiff},${totalIn},${prevBal},${allOutTxns},${actualBal})">차이 ${fmt(Math.abs(balDiff))} → 클릭하여 원인 확인</span>`:'<span style="color:var(--green)">✅ 일치</span>'}
         </div>
         ${noPrevBalHtml}
       </div>
@@ -1355,7 +1443,7 @@ function renderMonthly(){
 
     // 카테고리 합계 크로스체킹
     const catSum=allCats().reduce((s,c)=>{
-      if(c==='계좌간대체')return s;
+      if(c==='계좌간대체'||c==='가수금입금')return s;
       return s+(data[c]||0);
     },0);
     const crossDiff=totalOut-catSum;
@@ -1364,7 +1452,7 @@ function renderMonthly(){
     if(ccEl){
       ccEl.innerHTML=`
         <div style="background:${crossOk?'#EAFAF1':'#FDECEA'};border-radius:8px;padding:12px 16px;font-size:13px">
-          <div style="font-weight:700;margin-bottom:6px">${crossOk?'✅':'⚠️'} 항목 집계 검증</div>
+          <div style="font-weight:700;margin-bottom:6px">${crossOk?'✅':'⚠️'} 항목 집계 검증 <span style="font-size:11px;font-weight:400;color:var(--muted)">(지출 거래가 빠짐없이 카테고리에 들어갔는지 확인)</span></div>
           <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted);line-height:2;align-items:center">
             <span>총지출 <b style="color:var(--red)">${fmt(totalOut)}</b></span>
             <span>－</span>
@@ -1376,6 +1464,31 @@ function renderMonthly(){
                <span style="color:var(--muted)">기타사용 항목을 클릭해서 미분류 거래를 확인하세요</span>`
             }
           </div>
+          ${(()=>{
+            // rawData에 있지만 화면에 표시되지 않는 항목 찾기
+            // 표시 조건: allCats()에 있고, val>0이고, 가수금/계좌간대체 제외
+            const displayedCats=new Set(
+              allCats().filter(c=>{
+                const g=groupOf(c);
+                if(g==='가수금'||g==='계좌간대체')return false;
+                return (rawData[c]||0)>0;
+              })
+            );
+            const hidden=Object.entries(rawData)
+              .filter(([k,v])=>{
+                if(k.startsWith('_'))return false;
+                if(typeof v!=='number'||v<=0)return false;
+                if(k==='가수금입금'||k==='가수금'||k==='계좌간대체')return false;
+                return !displayedCats.has(k);
+              });
+            if(!hidden.length)return '';
+            return `<div style="margin-top:8px;padding:8px 12px;background:#FFF3CD;border-radius:6px;font-size:12px">
+              <b style="color:#856404">⚠️ 화면에 표시되지 않은 항목 (설정에서 그룹 확인 필요):</b>
+              <div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:8px">
+                ${hidden.map(([k,v])=>`<span style="background:#fff;border:1px solid #ffc107;border-radius:4px;padding:2px 8px">${k} <b>${fmt(v)}</b></span>`).join('')}
+              </div>
+            </div>`;
+          })()}
         </div>`;
     }
   }
@@ -1441,10 +1554,10 @@ function renderMonthly(){
       gasugeumSection.style.display='block';
       gasugeumDetail.innerHTML=`
         <div style="display:flex;gap:24px;flex-wrap:wrap;font-size:13px">
-          ${gasugumIn>0?`<span>법인에 넣음 <b style="color:var(--red)">－${fmt(gasugumIn)}</b></span>`:''}
-          ${gasugeum>0?`<span>법인에서 가져옴 <b style="color:var(--green)">＋${fmt(gasugeum)}</b></span>`:''}
+          ${gasugumIn>0?`<span>가수금 입금 <b style="color:var(--red)">＋${fmt(gasugumIn)}</b></span>`:''}
+          ${gasugeum>0?`<span>가수금 출금 <b style="color:var(--green)">－${fmt(gasugeum)}</b></span>`:''}
           <span style="border-left:1px solid var(--border);padding-left:24px">
-            순잔액 <b style="color:${(gasugeum-gasugumIn)>=0?'var(--green)':'var(--red)'};font-weight:700">${(gasugeum-gasugumIn)>=0?'+':''}${fmt(gasugeum-gasugumIn)}</b>
+            순잔액 <b style="color:${(gasugumIn-gasugeum)>=0?'var(--green)':'var(--red)'};font-weight:700">${(gasugumIn-gasugeum)>=0?'+':''}${fmt(gasugumIn-gasugeum)}</b>
           </span>
         </div>`;
     } else {
@@ -1553,25 +1666,30 @@ async function saveModalChanges(){
   try {
     await setDoc(doc(fsDB,'transactions',_modalKey),{txns:JSON.stringify(_modalTxns)});
     const prevMeta=(DB.monthly[_modalKey]&&DB.monthly[_modalKey]._meta)||{};
-    const inLastBal=prevMeta.inLastBal||0; // 입금계좌 잔액 보존
+    const inLastBal=prevMeta.inLastBal||0;
     const summary={};
-    let totalOut=0,outLastBal=0;
+    let totalOut=0,outLastBal=0,outGasugumIn=0;
     _modalTxns.forEach(t=>{
       if(t.out>0){
         const cat=t.cat||'기타사용';
         summary[cat]=(summary[cat]||0)+t.out;
         if(cat!=='계좌간대체') totalOut+=t.out;
       }
+      // 출금계좌 황효건 입금(가수금입금) 처리
+      if(t.inp>0&&t.cat==='가수금입금'){
+        outGasugumIn+=t.inp;
+        summary['가수금입금']=(summary['가수금입금']||0)+t.inp;
+      }
       if(t.bal)outLastBal=t.bal;
     });
+    // totalIn: 이전 입금계좌 수입 + 출금계좌 가수금입금
+    const prevIncomePortion=(prevMeta.totalIn||0)-(prevMeta.gasugumIn||0);
+    const totalIn=prevIncomePortion+outGasugumIn;
+    const gasugumIn=outGasugumIn>0?outGasugumIn:(prevMeta.gasugumIn||0);
     const combinedLastBal=outLastBal+inLastBal;
     const monthData=Object.assign({},summary,{_meta:{
-      totalOut,
-      totalIn:prevMeta.totalIn||0,
-      gasugumIn:prevMeta.gasugumIn||0,
-      lastBal:combinedLastBal,
-      outLastBal,
-      inLastBal,
+      totalOut, totalIn, gasugumIn,
+      lastBal:combinedLastBal, outLastBal, inLastBal,
       savedAt:new Date().toISOString()
     }});
     await saveDB(_modalKey, monthData);
@@ -1582,6 +1700,37 @@ async function saveModalChanges(){
     alert('✅ 저장 완료');
   } catch(e){ hideLoading(); alert('오류: '+e.message); }
 }
+
+async function showBalDiffDetail(mk, balDiff, totalIn, prevBal, totalOut, actualBal){
+  const data=DB.monthly[mk]||{};
+  const meta=data._meta||{};
+  showLoading('분석 중...');
+  let txns=[];
+  try{
+    const snap=await getDoc(doc(fsDB,'transactions',mk));
+    if(snap.exists()) txns=JSON.parse(snap.data().txns||'[]');
+  }catch(e){}
+  hideLoading();
+  // 출금계좌 inp>0 거래 목록
+  const inpTxns=txns.filter(t=>t.inp>0&&!t.isIncome);
+  let msg=`📊 ${mk} 잔액 차이 분석\n`;
+  msg+=`예상잔액: ${fmt(prevBal+totalIn-totalOut)} / 실제잔액: ${fmt(actualBal)}\n`;
+  msg+=`차이: ${fmt(Math.abs(balDiff))} (실제가 ${balDiff>0?'더 많음':'더 적음'})\n\n`;
+  msg+=`[출금통장 입금 거래 목록]\n`;
+  if(inpTxns.length===0){
+    msg+=`거래 없음 (출금.xls 재업로드 필요)\n`;
+  } else {
+    inpTxns.forEach(t=>{
+      msg+=`${t.date} | ${t.memo} | ${fmt(t.inp)} | 분류: ${t.cat||'미분류'}\n`;
+    });
+  }
+  msg+=`\n총 출금통장 입금: ${fmt(inpTxns.reduce((s,t)=>s+t.inp,0))}\n`;
+  msg+=`totalIn에 반영된 가수금입금: ${fmt(data['가수금입금']||0)}\n`;
+  const uncounted=inpTxns.filter(t=>t.cat==='계좌간대체').reduce((s,t)=>s+t.inp,0);
+  if(uncounted>0) msg+=`\n계좌간대체로 분류된 입금(totalIn 미포함): ${fmt(uncounted)}\n→ 이 중 실제 입금이 있으면 분류를 바꿔야 해요`;
+  alert(msg);
+}
+window.showBalDiffDetail=showBalDiffDetail;
 
 async function savePrevBal(monthKey, val){
   const bal=Number(String(val).replace(/,/g,''));
@@ -1723,9 +1872,11 @@ function renderAnnual(){
     const tr=document.createElement('tr');
     const nonNull=mVals.filter(v=>v!==null&&v>0);
     const grpCatCount=(DB.groups[g]||[]).length;
+    // 카테고리가 1개뿐인 그룹은 항목행 생략 (그룹행과 중복)
+    if(grpCatCount<=1)return;
     tr.innerHTML=`
       <td style="padding-left:16px;color:var(--muted);font-size:12px"></td>
-      <td>${grpCatCount>1?cat:''}</td>
+      <td>${cat}</td>
       ${mVals.map((v,i)=>{
         const mk=`${year}-${String(months[i]).padStart(2,'0')}`;
         const hasData=v&&v>0;
@@ -1745,30 +1896,33 @@ function renderAnnual(){
     const sepTr=document.createElement('tr');
     sepTr.innerHTML=`<td colspan="${14+2}" style="height:8px;background:var(--bg)"></td>`;
     tbody.appendChild(sepTr);
-    gasugumCats.forEach(cat=>{
-      const mVals=months.map((_,i)=>monthData[i]?monthData[i][cat]||0:null);
-      const total=mVals.reduce((s,v)=>s+(v||0),0);
-      if(!total)return;
+    // 가수금 + 가수금입금을 하나의 '가수금' 행으로 합산
+    const mVals=months.map((_,i)=>{
+      if(!monthData[i])return null;
+      return (monthData[i]['가수금']||0)+(monthData[i]['가수금입금']||0);
+    });
+    const total=mVals.reduce((s,v)=>s+(v||0),0);
+    if(total){
       const tr=document.createElement('tr');
       tr.style.cssText='background:#FEF9E7;color:var(--muted)';
       tr.innerHTML=`
         <td style="font-size:12px">가수금</td>
-        <td style="font-size:12px">${cat}</td>
+        <td style="font-size:12px">가수금</td>
         ${mVals.map(v=>`<td class="amount" style="font-size:12px">${v&&v>0?Math.round(v/10000)+'만':'-'}</td>`).join('')}
         <td class="amount" style="font-size:12px;font-weight:700">${fmt(total)}</td>
         <td class="amount" style="font-size:12px;color:var(--muted)">-</td>`;
       tbody.appendChild(tr);
-    });
+    }
   }
 }
 // ============================================================
-function addGroup(){
+async function addGroup(){
   const name=document.getElementById('new-group-name').value.trim();
   if(!name)return alert('구분명을 입력해주세요.');
   if(DB.groups[name])return alert('이미 있는 구분명이에요.');
   DB.groups[name]=[];
   DB.categories=Object.values(DB.groups).flat();
-  saveDB(null,null);
+  await saveDB(null,null);
   document.getElementById('new-group-name').value='';
   renderSettings();
 }
@@ -1804,19 +1958,22 @@ function renderSettings(){
       const keywords=Object.entries(DB.rules)
         .filter(([kw,c])=>c===cat)
         .map(([kw])=>kw);
+      const safeId=cat.replace(/[^a-zA-Z0-9가-힣]/g,'_');
       const kwChips=keywords.map(kw=>`
         <span style="display:inline-flex;align-items:center;gap:2px;background:#EAF0F8;border-radius:12px;padding:2px 8px;font-size:11px;margin:2px">
           ${kw}
-          <button onclick="deleteKeyword('${kw}')" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:12px;line-height:1;padding:0 0 0 2px">×</button>
+          <button data-kw="${kw.replace(/"/g,'&quot;')}" onclick="deleteKeyword(this.dataset.kw)" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:12px;line-height:1;padding:0 0 0 2px">×</button>
         </span>`).join('');
       return `
         <div style="display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:7px 12px;border-bottom:1px solid var(--border)">
           <span style="font-size:12px;font-weight:600;color:var(--navy2);min-width:130px">${cat}</span>
           <div style="display:flex;flex-wrap:wrap;gap:2px;flex:1">${kwChips||'<span style="font-size:11px;color:var(--muted)">키워드 없음</span>'}</div>
           <div style="display:flex;gap:4px;align-items:center;margin-left:auto">
-            <input type="text" id="kw2-${group}-${cat.replace(/[^a-zA-Z0-9가-힣]/g,'_')}" placeholder="키워드" style="width:90px;padding:3px 7px;border:1px solid var(--border);border-radius:5px;font-size:11px">
-            <button class="btn btn-gold btn-sm" style="font-size:11px;padding:3px 8px" onclick="addKwToCat('${group}','${cat}')">+ 추가</button>
-            ${cats.length>1?`<button onclick="deleteCatFromGroup('${group}','${cat}')" style="background:none;border:1px solid var(--border);border-radius:5px;cursor:pointer;color:var(--muted);font-size:11px;padding:3px 7px">항목삭제</button>`:''}
+            <input type="text" id="kw2-${group}-${safeId}" placeholder="키워드" style="width:90px;padding:3px 7px;border:1px solid var(--border);border-radius:5px;font-size:11px">
+            <button class="btn btn-gold btn-sm" style="font-size:11px;padding:3px 8px" data-group="${group}" data-cat="${cat}" onclick="addKwToCat(this.dataset.group,this.dataset.cat)">+ 추가</button>
+            ${cats.length>1?`
+            <button data-group="${group}" data-cat="${cat}" onclick="showMergePicker(this.dataset.group,this.dataset.cat)" style="background:none;border:1px solid var(--border);border-radius:5px;cursor:pointer;color:var(--muted);font-size:11px;padding:3px 7px">병합</button>
+            <button data-group="${group}" data-cat="${cat}" onclick="deleteCatFromGroup(this.dataset.group,this.dataset.cat)" style="background:none;border:1px solid var(--border);border-radius:5px;cursor:pointer;color:var(--muted);font-size:11px;padding:3px 7px">삭제</button>`:''}
           </div>
         </div>`;
     }).join('');
@@ -1844,33 +2001,38 @@ function renderSettings(){
   el.innerHTML=html;
 }
 
-function addCatToGroup(group){
+async function addCatToGroup(group){
   const input=document.getElementById(`newcat-input-${group}`);
   const newCat=input.value.trim();
   if(!newCat)return alert('항목명을 입력해주세요.');
   if(DB.groups[group].includes(newCat))return alert('이미 있는 항목이에요.');
   DB.groups[group].push(newCat);
-  if(!DB.categories.includes(newCat)) DB.categories.push(newCat);
-  saveDB(null,null);
+  if(!DB.categories.includes(newCat)){
+    // 같은 그룹 마지막 위치에 삽입
+    const grpCats=DB.groups[group];
+    let insertIdx=-1;
+    for(let i=DB.categories.length-1;i>=0;i--){
+      if(grpCats.includes(DB.categories[i])){insertIdx=i+1;break;}
+    }
+    if(insertIdx>=0) DB.categories.splice(insertIdx,0,newCat);
+    else DB.categories.push(newCat);
+  }
+  try{
+    await saveDB(null,null);
+    alert(`✅ '${newCat}' 저장 완료`);
+  }catch(e){
+    alert(`❌ 저장 실패: ${e.message}`);
+    return;
+  }
   renderSettings();
-  // 추가한 그룹 펼쳐서 보여주기
   const b=document.getElementById(`grp-body-${group}`);
   const a=document.getElementById(`grp-arrow-${group}`);
   if(b){b.style.display='block';}
   if(a){a.textContent='▼';}
 }
 
-function deleteCatFromGroup(group, cat){
-  if(!confirm(`'${cat}' 항목을 삭제할까요?\n이 항목으로 저장된 거래 데이터는 기타사용으로 처리됩니다.`))return;
-  DB.groups[group]=DB.groups[group].filter(c=>c!==cat);
-  DB.categories=DB.categories.filter(c=>c!==cat);
-  // 해당 카테고리로 매핑된 키워드도 제거
-  Object.keys(DB.rules).forEach(kw=>{if(DB.rules[kw]===cat)delete DB.rules[kw];});
-  saveDB(null,null);
-  renderSettings();
-}
 
-function deleteGroup(group){
+async function deleteGroup(group){
   if(!confirm(`'${group}' 구분을 삭제할까요?\n포함된 모든 항목과 키워드 규칙도 함께 삭제됩니다.`))return;
   const cats=DB.groups[group]||[];
   // 해당 그룹 카테고리 제거
@@ -1878,7 +2040,7 @@ function deleteGroup(group){
   // 해당 카테고리 키워드 제거
   Object.keys(DB.rules).forEach(kw=>{if(cats.includes(DB.rules[kw]))delete DB.rules[kw];});
   delete DB.groups[group];
-  saveDB(null,null);
+  await saveDB(null,null);
   renderSettings();
 }
 
@@ -1891,14 +2053,14 @@ function toggleGroup(group){
   arrow.textContent=isOpen?'▶':'▼';
 }
 
-function addKwToCat(group, cat){
+async function addKwToCat(group, cat){
   const safeId=cat.replace(/[^a-zA-Z0-9가-힣]/g,'_');
   const input=document.getElementById(`kw2-${group}-${safeId}`);
   if(!input)return;
   const kw=input.value.trim();
   if(!kw)return alert('키워드를 입력해주세요.');
   DB.rules[kw]=cat;
-  saveDB(null,null);
+  await saveDB(null,null);
   // 열린 상태 기억
   const openGroups=Array.from(document.querySelectorAll('[id^="grp-body-"]'))
     .filter(el=>el.style.display!=='none')
@@ -1912,19 +2074,62 @@ function addKwToCat(group, cat){
   });
 }
 
-function addKeywordToGroup(group){
+function showMergePicker(group, fromCat){
+  const cats=DB.groups[group].filter(c=>c!==fromCat);
+  if(!cats.length)return alert('병합할 다른 항목이 없어요.');
+  const toCat=prompt(`'${fromCat}' 를 어느 항목으로 병합할까요?\n\n선택 가능:\n${cats.join('\n')}\n\n항목명 정확히 입력:`, cats[0]);
+  if(!toCat||!cats.includes(toCat))return alert('올바른 항목명을 입력해주세요.');
+  mergeCat(group, fromCat, toCat);
+}
+
+async function mergeCat(group, fromCat, toCat){
+  if(!confirm(`'${fromCat}' → '${toCat}'으로 병합할까요?\n모든 월별 데이터에서 합산됩니다.`))return;
+  showLoading('병합 중...');
+  for(const [mk, data] of Object.entries(DB.monthly)){
+    if(data[fromCat]){
+      const updated=Object.assign({},data);
+      updated[toCat]=(updated[toCat]||0)+updated[fromCat];
+      delete updated[fromCat];
+      DB.monthly[mk]=updated;
+      await saveDB(mk, updated);
+    }
+  }
+  DB.groups[group]=DB.groups[group].filter(c=>c!==fromCat);
+  DB.categories=DB.categories.filter(c=>c!==fromCat);
+  Object.keys(DB.rules).forEach(kw=>{if(DB.rules[kw]===fromCat) DB.rules[kw]=toCat;});
+  await saveDB(null,null);
+  hideLoading();
+  alert(`✅ '${fromCat}' → '${toCat}' 병합 완료`);
+  renderSettings();
+  renderMonthly();
+}
+
+async function deleteCatFromGroup(group, cat){
+  const hasData=Object.values(DB.monthly).some(m=>m[cat]>0);
+  const msg=hasData
+    ?`⚠️ '${cat}'에 저장된 데이터가 있어요!\n삭제해도 Firestore 데이터는 유지되므로\n다시 추가하면 복원 가능해요.\n\n그래도 삭제할까요?`
+    :`'${cat}' 항목을 삭제할까요?`;
+  if(!confirm(msg))return;
+  DB.groups[group]=DB.groups[group].filter(c=>c!==cat);
+  DB.categories=DB.categories.filter(c=>c!==cat);
+  Object.keys(DB.rules).forEach(kw=>{if(DB.rules[kw]===cat)delete DB.rules[kw];});
+  await saveDB(null,null);
+  renderSettings();
+}
+
+async function addKeywordToGroup(group){
   const kw=document.getElementById(`kw-input-${group}`);
   const cat=document.getElementById(`cat-select-${group}`);
   if(!kw||!cat)return;
   if(!kw.value.trim())return alert('키워드를 입력해주세요.');
   DB.rules[kw.value.trim()]=cat.value;
-  saveDB(null,null);
+  await saveDB(null,null);
   renderSettings();
 }
 
-function deleteKeyword(kw){
+async function deleteKeyword(kw){
   delete DB.rules[kw];
-  saveDB(null,null);
+  await saveDB(null,null);
   renderSettings();
 }
 
@@ -2048,18 +2253,22 @@ async function saveEditedMonthFromEdit(mk){
   const[y,m]=mk.split('-');
   const prevMeta=(DB.monthly[mk]&&DB.monthly[mk]._meta)||{};
   const summary={};
-  let totalOut=0,outLastBal=0;
+  let totalOut=0,outLastBal=0,outGasugumIn=0;
   txns.forEach(t=>{
     if(t.out>0){
       const cat=t.cat||'기타사용';
       summary[cat]=(summary[cat]||0)+t.out;
       if(cat!=='계좌간대체') totalOut+=t.out;
     }
+    if(t.inp>0&&t.cat==='가수금입금'){
+      outGasugumIn+=t.inp;
+      summary['가수금입금']=(summary['가수금입금']||0)+t.inp;
+    }
     if(t.bal)outLastBal=t.bal;
   });
   const inLastBal=prevMeta.inLastBal||0;
-  const totalIn=prevMeta.totalIn||0;
-  const gasugumIn=prevMeta.gasugumIn||0;
+  const gasugumIn=outGasugumIn>0?outGasugumIn:(prevMeta.gasugumIn||0);
+  const totalIn=outGasugumIn>0?(prevMeta.totalIn||0)-(prevMeta.gasugumIn||0)+outGasugumIn:(prevMeta.totalIn||0);
   const lastBal=outLastBal+inLastBal;
   const monthData=Object.assign({},summary,{_meta:{
     totalOut,totalIn,gasugumIn,lastBal,outLastBal,inLastBal,
@@ -2156,6 +2365,11 @@ async function init(){
 
   // 저장된 월별 내역 표시
   refreshSavedMonths();
+  // 마지막 활성 탭 복원 (새로고침 시 유지)
+  const lastTab=sessionStorage.getItem('activeTab');
+  if(lastTab&&lastTab!=='upload'){
+    showTab(lastTab, document.querySelector(`.nav-btn[data-tab="${lastTab}"]`));
+  }
   hideLoading();
 }
 
@@ -2166,6 +2380,7 @@ function showTab(name, btn){
   document.getElementById('tab-'+name).classList.add('active');
   const activeBtn=btn||document.querySelector('.nav-btn[data-tab="'+name+'"]');
   if(activeBtn)activeBtn.classList.add('active');
+  sessionStorage.setItem('activeTab', name);
 
   if(name==='monthly'){
     // 탭이 보이는 상태에서 값 설정 (hidden 상태에서 value 설정 안 되는 브라우저 이슈 해결)
@@ -2215,6 +2430,8 @@ window.savePrevBal = savePrevBal;
 window.renderSettings = renderSettings;
 window.addKeywordToGroup = addKeywordToGroup;
 window.addCatToGroup = addCatToGroup;
+window.showMergePicker = showMergePicker;
+window.mergeCat = mergeCat;
 window.deleteCatFromGroup = deleteCatFromGroup;
 window.toggleGroup = toggleGroup;
 window.addKwToCat = addKwToCat;
