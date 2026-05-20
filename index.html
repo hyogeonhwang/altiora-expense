@@ -347,12 +347,13 @@ hr{border:none;border-top:1px solid var(--border);margin:16px 0}
       <table id="annual-table">
         <thead>
           <tr>
-            <th>구분</th><th>항목</th>
-            <th style="text-align:right">1월</th><th style="text-align:right">2월</th><th style="text-align:right">3월</th>
-            <th style="text-align:right">4월</th><th style="text-align:right">5월</th><th style="text-align:right">6월</th>
-            <th style="text-align:right">7월</th><th style="text-align:right">8월</th><th style="text-align:right">9월</th>
-            <th style="text-align:right">10월</th><th style="text-align:right">11월</th><th style="text-align:right">12월</th>
-            <th style="text-align:right">합계</th><th style="text-align:right">월평균</th>
+            <th style="min-width:60px;position:sticky;left:0;z-index:2;background:#1A2A4A;white-space:nowrap">구분</th>
+            <th style="min-width:120px;position:sticky;left:60px;z-index:2;background:#1A2A4A;white-space:nowrap;box-shadow:2px 0 4px rgba(0,0,0,.15)">항목</th>
+            <th style="text-align:right;min-width:90px">1월</th><th style="text-align:right;min-width:90px">2월</th><th style="text-align:right;min-width:90px">3월</th>
+            <th style="text-align:right;min-width:90px">4월</th><th style="text-align:right;min-width:90px">5월</th><th style="text-align:right;min-width:90px">6월</th>
+            <th style="text-align:right;min-width:90px">7월</th><th style="text-align:right;min-width:90px">8월</th><th style="text-align:right;min-width:90px">9월</th>
+            <th style="text-align:right;min-width:90px">10월</th><th style="text-align:right;min-width:90px">11월</th><th style="text-align:right;min-width:90px">12월</th>
+            <th style="text-align:right;min-width:100px">합계</th><th style="text-align:right;min-width:100px">월평균</th>
           </tr>
         </thead>
         <tbody id="annual-tbody"></tbody>
@@ -459,7 +460,7 @@ const GROUPS = {
   '통신': ['LGU+','SKT(핸드폰)'],
   '급식': ['급식'],
   '청소': ['청소'],
-  '교육프로그램': ['에듀베이션(통통통)','정규체육(키즈티티)','링크랑','트니트니','트윈클','하와하프','도예','티피코교육'],
+  '교육프로그램': ['에듀베이션(통통통)','정규체육(키즈티티)','링크랑','트니트니','트윈클','하와하프','도예','티피코교육','큐라스픽'],
   '교재도서': ['이엠북스','세모에듀','에듀고고','브리그로교육','교재비'],
   '환불': ['수강료환불','도서보증금환불'],
   '카드대금': ['카드대금'],
@@ -490,7 +491,7 @@ const DEFAULT_RULES = {
   '에듀베이션':'에듀베이션(통통통)','대교에듀베이션':'에듀베이션(통통통)',
   '키즈티티':'정규체육(키즈티티)','정규체육':'정규체육(키즈티티)',
   '링크랑':'링크랑','트니트니':'트니트니','트윈클':'트윈클',
-  '하와하프':'하와하프','도예':'도예','티피코':'티피코교육',
+  '하와하프':'하와하프','도예':'도예','티피코':'티피코교육','큐라스':'큐라스픽','큐라스픽':'큐라스픽',
   // 교재도서
   '이엠북스':'이엠북스','세모에듀':'세모에듀','에듀고고':'에듀고고',
   '브리그로':'브리그로교육','러닝앤코':'교재비','주식회사러닝앤코':'교재비',
@@ -499,6 +500,7 @@ const DEFAULT_RULES = {
   '키즈밀':'급식','급식':'급식','자연애':'급식',
   // 환불
   '환불':'수강료환불','퇴원환불':'수강료환불','등록취소':'수강료환불','취소환불':'수강료환불',
+  '성남사랑':'수강료환불','성남상품권':'수강료환불',
   '도서보증금':'도서보증금환불',
   // 직원숙소월세
   '펠리샤':'직원숙소월세','멜리사':'직원숙소월세',
@@ -544,8 +546,8 @@ async function loadDB(){
           // Firestore 로드 + HTML 엔티티 정규화
           const fg={};
           Object.entries(cfg.userGroups).forEach(([g,cats])=>{fg[fixStr(g)]=cats.map(fixStr);});
-          // DEFAULT_GROUPS의 새 항목을 Firestore groups에 병합
-          Object.entries(DEFAULT_GROUPS).forEach(([g,defaultCats])=>{
+          // GROUPS의 새 항목을 Firestore groups에 병합
+          Object.entries(GROUPS).forEach(([g,defaultCats])=>{
             if(fg[g]){
               defaultCats.forEach(c=>{
                 if(!fg[g].includes(c)){
@@ -565,15 +567,17 @@ async function loadDB(){
             }
           });
           DB.groups=fg;
-          // DB.categories를 DB.groups 순서에 맞게 재정렬
+          // GROUPS 상수 순서 기준으로 categories 재정렬 (급여→임대료→... 원래 순서)
           const reordered=[];
           const used=new Set();
-          Object.values(fg).forEach(cats=>cats.forEach(c=>{
-            if(!used.has(c)){reordered.push(c);used.add(c);}
-          }));
+          Object.keys(GROUPS).forEach(g=>{
+            if(fg[g]) fg[g].forEach(c=>{if(!used.has(c)){reordered.push(c);used.add(c);}});
+          });
+          Object.keys(fg).forEach(g=>{
+            if(!GROUPS[g]) fg[g].forEach(c=>{if(!used.has(c)){reordered.push(c);used.add(c);}});
+          });
           DB.categories.forEach(c=>{if(!used.has(c)){reordered.push(c);used.add(c);}});
           DB.categories=reordered;
-          // 병합된 내용 Firestore에 저장 (다음 로드 시도 병합 불필요하게)
           try{
             await setDoc(doc(fsDB,'config','settings'),{
               userRules:DB.rules, userCategories:DB.categories,
@@ -581,7 +585,7 @@ async function loadDB(){
               incomeAccount:cfg.incomeAccount||'',
               expenseAccount:cfg.expenseAccount||''
             });
-          }catch(e){console.error('config 업데이트 오류:',e);}
+          }catch(e){console.error('config 저장 오류:',e);}
         }
         if(!DB.config) DB.config={};
         DB.config.incomeAccount=cfg.incomeAccount||'';
@@ -628,6 +632,7 @@ function groupOf(cat){for(const[g,cs]of Object.entries(DB.groups))if(cs.includes
 // HELPERS
 // ============================================================
 function fmt(n){if(!n||isNaN(n))return '-';return Math.round(n).toLocaleString('ko-KR')+'원'}
+function fmtMan(n){if(!n||isNaN(n))return '-';return Math.round(n/10000).toLocaleString('ko-KR')+'만'}
 function fmtShort(n){if(!n||isNaN(n))return '-';if(Math.abs(n)>=100000000)return (n/100000000).toFixed(1)+'억';if(Math.abs(n)>=10000)return Math.round(n/10000)+'만';return n.toLocaleString()+'원'}
 function pct(a,b){if(!b)return '';return (a/b*100).toFixed(1)+'%'}
 function diffStr(curr,prev){if(!prev||!curr)return '';const d=curr-prev;const p=(d/prev*100).toFixed(1);return (d>=0?'▲':'▼')+' '+Math.abs(Math.round(d)).toLocaleString()+'원 ('+Math.abs(p)+'%)';}
@@ -1255,13 +1260,36 @@ async function saveMonth(){
     if(t.bal)inLastBal=t.bal;
   });
   // inTxns가 비어있으면(출금파일만 업로드) 기존 입금계좌 값 보존
-  // 단, outTxns에서 나온 가수금입금은 새로 계산한 값 사용
   if(inTxns.length===0){
     inLastBal=prevMetaForSave.inLastBal||0;
-    // 이전 totalIn에서 이전 gasugumIn 제거 후 새 outGasugumIn 추가
     const prevIncomePortion=(prevMetaForSave.totalIn||0)-(prevMetaForSave.gasugumIn||0);
     totalIn=prevIncomePortion+outGasugumIn;
     gasugumIn=outGasugumIn>0?outGasugumIn:(prevMetaForSave.gasugumIn||0);
+    // 이전 입금계좌 summary 항목 보존 (수강료환불 등)
+    const prevData=DB.monthly[key]||{};
+    Object.entries(prevData).forEach(([k,v])=>{
+      if(k.startsWith('_')||!v||typeof v!=='number')return;
+      // 입금계좌에서 나온 항목: allCats에 있고 outTxns에서 안 나온 것
+      const inCats=inTxns.map(t=>t.cat).filter(Boolean);
+      const outCatKeys=Object.keys(summary);
+      if(!outCatKeys.includes(k)&&!inCats.includes(k)){
+        summary[k]=(summary[k]||0);// 유지(outTxns에서 없는 건 건드리지 않음)
+      }
+    });
+  }
+  // txns가 비어있으면(입금파일만 업로드) 기존 출금계좌 값 보존
+  if(txns.length===0){
+    outLastBal=prevMetaForSave.outLastBal||0;
+    totalOut=(prevMetaForSave.totalOut||0);
+    outGasugumIn=prevMetaForSave.gasugumIn||0;
+    gasugumIn=outGasugumIn+gasugumIn;
+    totalIn+=outGasugumIn;
+    // 이전 출금계좌 summary 항목 보존
+    const prevData=DB.monthly[key]||{};
+    Object.entries(prevData).forEach(([k,v])=>{
+      if(k.startsWith('_')||!v||typeof v!=='number')return;
+      if(!summary[k]) summary[k]=v;
+    });
   }
   const lastBal=outLastBal+inLastBal;
   const monthData=Object.assign({},summary,{_meta:{totalOut,totalIn,gasugumIn,lastBal,outLastBal,inLastBal,savedAt:new Date().toISOString()}});
@@ -1500,6 +1528,8 @@ function renderMonthly(){
   let groupIdx=0;
   allCats().forEach(cat=>{
     const g=groupOf(cat);
+    if(g==='계좌간대체')return;
+    if(cat==='가수금입금')return; // 입금(황효건→법인)은 지출 아님
     const val=(rawData[cat])||0;
     const prevVal=(prev&&prev[cat])||0;
     if(!val)return;
@@ -1593,11 +1623,13 @@ async function openCatModal(cat, monthKey){
 
 function renderModal(){
   const filtered=_modalTxns.filter(t=>{
+    // 가수금입금은 inp>0 거래
+    if(_modalCat==='가수금입금') return t.cat==='가수금입금'&&t.inp>0;
     if(!t.out||t.out<=0)return false;
-    if(_modalCat==='기타사용') return t.cat==='기타사용'||!t.cat;
+    if(_modalCat==='기타사용') return t.cat==='기타사용'||!t.cat||(!DB.categories.includes(t.cat)&&t.out>0);
     return t.cat===_modalCat;
   });
-  const total=filtered.reduce((s,t)=>s+t.out,0);
+  const total=filtered.reduce((s,t)=>s+(t.out>0?t.out:t.inp>0?t.inp:0),0);
   // 드롭다운: 구분값(그룹명) 목록
   const groupOpts=Object.keys(DB.groups).map(g=>{
     const isCurrent=DB.groups[g].includes(_modalCat);
@@ -1624,17 +1656,19 @@ function renderModal(){
           ${grpCats.map(c=>`<option value="${c}" ${c===curCat?'selected':''}>${c}</option>`).join('')}
         </select>`
       :'';
+    const amt=t.out>0?t.out:t.inp>0?t.inp:0;
+    const isInpTxn=t.inp>0&&!t.out;
     return `<tr style="border-bottom:1px solid var(--border)">
       <td style="padding:8px;color:var(--muted);font-size:12px">${t.date?t.date.slice(5):''}</td>
       <td style="padding:8px;font-size:13px">${t.memo||'-'}</td>
-      <td style="padding:8px;text-align:right;font-size:13px">${fmt(t.out)}</td>
+      <td style="padding:8px;text-align:right;font-size:13px">${fmt(amt)}</td>
       <td style="padding:8px">
-        <div style="display:flex;gap:4px">
+        ${isInpTxn?`<span style="font-size:12px;color:var(--muted)">${t.cat||''}</span>`:`<div style="display:flex;gap:4px">
           <select onchange="changeModalGroup(${realIdx},this.value)" style="flex:1;padding:4px 6px;font-size:12px;border:1px solid var(--border);border-radius:6px">
             ${groupOpts}
           </select>
           ${catSel}
-        </div>
+        </div>`}
       </td>
     </tr>`;
   }).join('');
@@ -1865,7 +1899,7 @@ function renderAnnual(){
       const grpTotal=grpTotals.reduce((s,v)=>s+(v||0),0);
       const tr=document.createElement('tr');
       tr.className='cat-group';
-      tr.innerHTML=`<td colspan="2"><b>${g}</b></td>${grpTotals.map(v=>`<td class="amount">${v?Math.round(v/10000)+'만':'-'}</td>`).join('')}<td class="amount">${fmt(grpTotal)}</td><td class="amount">${grpTotal?fmt(grpTotal/validTotals.length):'-'}</td>`;
+      tr.innerHTML=`<td colspan="2" style="position:sticky;left:0;z-index:1;background:var(--card);box-shadow:2px 0 4px rgba(0,0,0,.08);white-space:nowrap"><b>${g}</b></td>${grpTotals.map(v=>`<td class="amount" style="white-space:nowrap">${v?fmtMan(v):'-'}</td>`).join('')}<td class="amount" style="white-space:nowrap">${fmt(grpTotal)}</td><td class="amount" style="white-space:nowrap">${grpTotal?fmt(grpTotal/validTotals.length):'-'}</td>`;
       tbody.appendChild(tr);
       lastGrp=g;
     }
@@ -1875,13 +1909,13 @@ function renderAnnual(){
     // 카테고리가 1개뿐인 그룹은 항목행 생략 (그룹행과 중복)
     if(grpCatCount<=1)return;
     tr.innerHTML=`
-      <td style="padding-left:16px;color:var(--muted);font-size:12px"></td>
-      <td>${cat}</td>
+      <td style="padding-left:16px;color:var(--muted);font-size:12px;position:sticky;left:0;z-index:1;background:var(--card)"></td>
+      <td style="position:sticky;left:60px;z-index:1;background:var(--card);white-space:nowrap;box-shadow:2px 0 4px rgba(0,0,0,.08)">${cat}</td>
       ${mVals.map((v,i)=>{
         const mk=`${year}-${String(months[i]).padStart(2,'0')}`;
         const hasData=v&&v>0;
         return `<td class="amount">${hasData
-          ?`<span style="cursor:pointer;color:var(--navy2);text-decoration:underline;text-underline-offset:2px" onclick="openCatModal('${cat}','${mk}')">${Math.round(v/10000)}만</span>`
+          ?`<span style="cursor:pointer;color:var(--navy2);text-decoration:underline;text-underline-offset:2px" onclick="openCatModal('${cat}','${mk}')">${fmtMan(v)}</span>`
           :'-'}</td>`;
       }).join('')}
       <td class="amount" style="font-weight:700">${fmt(total)}</td>
@@ -1890,26 +1924,36 @@ function renderAnnual(){
   });
 
   // 가수금 맨 아래 별도 표시
-  const gasugumCats=['가수금','가수금입금'];
-  const hasGasugum=gasugumCats.some(c=>monthData.some(d=>d&&d[c]));
+  const hasGasugum=['가수금','가수금입금'].some(c=>monthData.some(d=>d&&d[c]));
   if(hasGasugum){
     const sepTr=document.createElement('tr');
     sepTr.innerHTML=`<td colspan="${14+2}" style="height:8px;background:var(--bg)"></td>`;
     tbody.appendChild(sepTr);
-    // 가수금 + 가수금입금을 하나의 '가수금' 행으로 합산
-    const mVals=months.map((_,i)=>{
-      if(!monthData[i])return null;
-      return (monthData[i]['가수금']||0)+(monthData[i]['가수금입금']||0);
-    });
-    const total=mVals.reduce((s,v)=>s+(v||0),0);
-    if(total){
+    // 가수금 출금 (법인→황효건, 지출)
+    const outVals=months.map((_,i)=>monthData[i]?(monthData[i]['가수금']||0):null);
+    const outTotal=outVals.reduce((s,v)=>s+(v||0),0);
+    // 가수금입금 (황효건→법인, 수입)
+    const inVals=months.map((_,i)=>monthData[i]?(monthData[i]['가수금입금']||0):null);
+    const inTotal=inVals.reduce((s,v)=>s+(v||0),0);
+    // 순잔액 (누적 가수금 잔액: 출금 - 입금)
+    const netTotal=outTotal-inTotal;
+    if(outTotal||inTotal){
       const tr=document.createElement('tr');
       tr.style.cssText='background:#FEF9E7;color:var(--muted)';
       tr.innerHTML=`
         <td style="font-size:12px">가수금</td>
-        <td style="font-size:12px">가수금</td>
-        ${mVals.map(v=>`<td class="amount" style="font-size:12px">${v&&v>0?Math.round(v/10000)+'만':'-'}</td>`).join('')}
-        <td class="amount" style="font-size:12px;font-weight:700">${fmt(total)}</td>
+        <td style="font-size:12px">출금－입금</td>
+        ${months.map((_,i)=>{
+          const out=outVals[i]||0;
+          const inp=inVals[i]||0;
+          const net=out-inp;
+          if(!out&&!inp)return`<td class="amount" style="font-size:12px">-</td>`;
+          let txt='';
+          if(out>0)txt+=`<span style="color:var(--red)">－${fmtMan(out)}</span>`;
+          if(inp>0)txt+=`${out>0?'<br>':''}<span style="color:var(--green)">＋${fmtMan(inp)}</span>`;
+          return`<td class="amount" style="font-size:12px">${txt}</td>`;
+        }).join('')}
+        <td class="amount" style="font-size:12px;font-weight:700;color:${netTotal>=0?'var(--red)':'var(--green)'}">${netTotal>=0?'－':'＋'}${fmt(Math.abs(netTotal))}</td>
         <td class="amount" style="font-size:12px;color:var(--muted)">-</td>`;
       tbody.appendChild(tr);
     }
