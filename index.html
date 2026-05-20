@@ -179,6 +179,7 @@ hr{border:none;border-top:1px solid var(--border);margin:16px 0}
     <button class="nav-btn active" data-tab="upload" onclick="showTab('upload',this)">📤 월별 업로드</button>
     <button class="nav-btn" data-tab="monthly" onclick="showTab('monthly',this)">📊 월별현황</button>
     <button class="nav-btn" data-tab="annual" onclick="showTab('annual',this)">📈 연간추이</button>
+    <button class="nav-btn" data-tab="txnlist" onclick="showTab('txnlist',this)">📋 거래내역</button>
     <button class="nav-btn" data-tab="settings" onclick="showTab('settings',this)">⚙️ 설정</button>
   </div>
 </div>
@@ -401,6 +402,49 @@ hr{border:none;border-top:1px solid var(--border);margin:16px 0}
   </div>
 </div>
 
+<!-- ===================== TXNLIST TAB ===================== -->
+<div id="tab-txnlist" class="tab-panel">
+  <div class="card">
+    <div class="card-title">거래내역</div>
+    <div style="display:flex;gap:12px;align-items:center;margin-bottom:16px;flex-wrap:wrap">
+      <select id="txn-year" style="width:100px;padding:6px 10px;border:1px solid var(--border);border-radius:6px">
+        <option>2026</option><option>2025</option>
+      </select>
+      <select id="txn-month" style="width:80px;padding:6px 10px;border:1px solid var(--border);border-radius:6px">
+        <option value="01">1월</option><option value="02">2월</option><option value="03">3월</option>
+        <option value="04">4월</option><option value="05">5월</option><option value="06">6월</option>
+        <option value="07">7월</option><option value="08">8월</option><option value="09">9월</option>
+        <option value="10">10월</option><option value="11">11월</option><option value="12">12월</option>
+      </select>
+      <select id="txn-filter" style="width:110px;padding:6px 10px;border:1px solid var(--border);border-radius:6px">
+        <option value="all">전체</option>
+        <option value="out">출금계좌</option>
+        <option value="in">입금계좌</option>
+      </select>
+      <button class="btn btn-navy" onclick="loadTxnList()">조회</button>
+      <button class="btn btn-gold" id="txn-save-btn" onclick="saveTxnChanges()" style="display:none">💾 변경사항 저장</button>
+      <span id="txn-save-status" style="font-size:12px;color:var(--green)"></span>
+    </div>
+    <div style="overflow-x:auto">
+      <table id="txn-table" style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead>
+          <tr style="background:var(--navy);color:#fff">
+            <th style="padding:8px 10px;text-align:left;white-space:nowrap">날짜</th>
+            <th style="padding:8px 10px;text-align:left">계좌</th>
+            <th style="padding:8px 10px;text-align:left;min-width:160px">내역</th>
+            <th style="padding:8px 10px;text-align:right;white-space:nowrap">출금</th>
+            <th style="padding:8px 10px;text-align:right;white-space:nowrap">입금</th>
+            <th style="padding:8px 10px;text-align:left;min-width:160px">카테고리</th>
+          </tr>
+        </thead>
+        <tbody id="txn-tbody">
+          <tr><td colspan="6" style="text-align:center;padding:32px;color:var(--muted)">월을 선택하고 조회하세요</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
 </div><!-- /container -->
 
 <script type="module">
@@ -518,13 +562,14 @@ const DEFAULT_RULES = {
   '현수막':'기타사용',
   '크몽':'기타사용','구글':'기타사용','마케팅':'기타사용',
   '생일선물':'기타사용','액자':'기타사용','pc수리':'기타사용','조명':'기타사용','졸업식':'기타사용',
-  // 계좌간대체 (와이제이투 등 계좌간 이체 - 실지출 아님)
+  // 계좌간대체 (와이제이투 수강료 입금 - 입금계좌 기준 수신)
   '와이제이투':'계좌간대체',
   // 가수금 (황효건 대표 입금 - 출금계좌 기준 입금)
   '황효건':'가수금',
 };
 
-let DB = {rules:Object.assign({},DEFAULT_RULES), categories:Object.values(GROUPS).reduce(function(a,b){return a.concat(b);},[]), groups:GROUPS, monthly:{}};
+let DB = {rules:Object.assign({},DEFAULT_RULES), categories:Object.values(GROUPS).reduce(function(a,b){return a.concat(b);},[]), groups:GROUPS, monthly:{}, config:{incomeAccount:'',expenseAccount:''}};
+window.DB = DB; // 디버그 및 전역 접근용
 
 async function loadDB(){
   showLoading('데이터 불러오는 중...');
@@ -627,6 +672,173 @@ async function saveDB(key, data, txns){
 }
 function allCats(){return DB.categories}
 function groupOf(cat){for(const[g,cs]of Object.entries(DB.groups))if(cs.includes(cat))return g;return '기타지출'}
+
+// ============================================================
+// 거래내역 탭
+// ============================================================
+let _txnListData=[]; // {idx, t, mk}
+let _txnChanges={}; // {idx: newCat} 변경사항 추적
+let _txnCurrentMk='';
+
+async function loadTxnList(){
+  const year=document.getElementById('txn-year').value;
+  const month=document.getElementById('txn-month').value;
+  const filter=document.getElementById('txn-filter').value;
+  const mk=`${year}-${month}`;
+  _txnCurrentMk=mk;
+  _txnChanges={};
+  const saveBtn=document.getElementById('txn-save-btn');
+  if(saveBtn) saveBtn.style.display='none';
+
+  const tbody=document.getElementById('txn-tbody');
+  tbody.innerHTML=`<tr><td colspan="6" style="text-align:center;padding:32px;color:var(--muted)">불러오는 중...</td></tr>`;
+
+  let txns=[];
+  try{
+    const snap=await getDoc(doc(fsDB,'transactions',mk));
+    if(snap.exists()){
+      const d=snap.data();
+      if(d.txns) txns=typeof d.txns==='string'?JSON.parse(d.txns):d.txns;
+      else if(d.list) txns=d.list;
+    }
+  }catch(e){
+    tbody.innerHTML=`<tr><td colspan="6" style="text-align:center;padding:32px;color:var(--red)">거래내역을 불러올 수 없어요</td></tr>`;
+    return;
+  }
+  if(!txns.length){
+    tbody.innerHTML=`<tr><td colspan="6" style="text-align:center;padding:32px;color:var(--muted)">데이터가 없어요. 먼저 업로드 탭에서 저장하세요</td></tr>`;
+    return;
+  }
+
+  let filtered=txns.map((t,i)=>({t,i}));
+  if(filter==='out') filtered=filtered.filter(({t})=>!t.isIncome);
+  if(filter==='in') filtered=filtered.filter(({t})=>t.isIncome);
+
+  _txnListData=filtered;
+
+  const catOptions=allCats().map(c=>`<option value="${c}">${c}</option>`).join('');
+  const specialOpts=`<option value="계좌간대체">계좌간대체</option><option value="수입">수입</option>`;
+
+  tbody.innerHTML=filtered.map(({t,i})=>{
+    const acctBadge=t.isIncome
+      ?`<span style="background:#EAF4FB;color:#1A6FA8;border-radius:4px;padding:1px 6px;font-size:11px">입금</span>`
+      :`<span style="background:#FEF0EC;color:#C0392B;border-radius:4px;padding:1px 6px;font-size:11px">출금</span>`;
+    const curCat=t.cat||'';
+    const isExcluded=curCat==='계좌간대체'||curCat==='수입';
+    return `<tr id="txnrow-${i}" style="border-bottom:1px solid var(--border);${isExcluded?'color:var(--muted)':''}">
+      <td style="padding:7px 10px;white-space:nowrap;${isExcluded?'opacity:0.5':''}">${(t.date||'').slice(5)}</td>
+      <td style="padding:7px 10px;${isExcluded?'opacity:0.5':''}">${acctBadge}</td>
+      <td style="padding:7px 10px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;${isExcluded?'opacity:0.5':''}" title="${t.memo||''}">${t.memo||'-'}</td>
+      <td style="padding:7px 10px;text-align:right;color:var(--red);${isExcluded?'opacity:0.5':''}">${t.out>0?fmt(t.out):''}</td>
+      <td style="padding:7px 10px;text-align:right;color:var(--green);${isExcluded?'opacity:0.5':''}">${t.inp>0?fmt(t.inp):''}</td>
+      <td style="padding:7px 10px">
+        <select style="width:100%;padding:4px 6px;font-size:12px;border:1px solid var(--border);border-radius:5px"
+          onchange="markTxnChange(${i},this.value,this)">
+          <option value="">-- 미분류 --</option>
+          ${catOptions}${specialOpts}
+        </select>
+      </td>
+    </tr>`;
+  }).join('');
+
+  filtered.forEach(({t,i})=>{
+    const sel=document.querySelector(`#txnrow-${i} select`);
+    if(sel&&t.cat) sel.value=t.cat;
+  });
+}
+
+function markTxnChange(rowIdx, newCat, selEl){
+  _txnChanges[rowIdx]=newCat;
+  // 행 스타일 업데이트
+  const row=document.getElementById(`txnrow-${rowIdx}`);
+  if(row){
+    const isExcluded=newCat==='계좌간대체'||newCat==='수입';
+    row.querySelectorAll('td:not(:last-child)').forEach(td=>td.style.opacity=isExcluded?'0.5':'1');
+    row.style.background=Object.keys(_txnChanges).length?'#FFFDE7':'';
+  }
+  // 변경 표시
+  const saveBtn=document.getElementById('txn-save-btn');
+  if(saveBtn) saveBtn.style.display='';
+  const st=document.getElementById('txn-save-status');
+  if(st) st.textContent=`${Object.keys(_txnChanges).length}건 변경됨`;
+}
+
+async function saveTxnChanges(){
+  if(!Object.keys(_txnChanges).length) return;
+  const mk=_txnCurrentMk;
+  showLoading('저장 중...');
+  try{
+    const snap=await getDoc(doc(fsDB,'transactions',mk));
+    if(!snap.exists()){hideLoading();alert('거래내역 데이터가 없어요');return;}
+    const d=snap.data();
+    let txns=d.txns?JSON.parse(d.txns):(d.list||[]);
+    // 변경사항 적용
+    Object.entries(_txnChanges).forEach(([idx,cat])=>{
+      if(txns[idx]) txns[idx].cat=cat;
+    });
+    // 저장
+    await setDoc(doc(fsDB,'transactions',mk),{txns:JSON.stringify(txns)});
+    // summary 재계산
+    await recalcMonthSummary(mk, txns);
+    // 변경 초기화
+    _txnChanges={};
+    // 행 하이라이트 제거
+    _txnListData.forEach(({i})=>{
+      const row=document.getElementById(`txnrow-${i}`);
+      if(row) row.style.background='';
+    });
+    const saveBtn=document.getElementById('txn-save-btn');
+    if(saveBtn) saveBtn.style.display='none';
+    const st=document.getElementById('txn-save-status');
+    if(st){st.textContent='✅ 저장 완료';setTimeout(()=>st.textContent='',3000);}
+  }catch(e){
+    console.error(e);
+    alert('저장 실패: '+e.message);
+  }
+  hideLoading();
+}
+
+async function recalcMonthSummary(mk, txns){
+  const prevMeta=(DB.monthly[mk]&&DB.monthly[mk]._meta)||{};
+  const summary={};
+  let expenseTotalOut=0, incomeTotalOut=0, totalIn=0;
+  let outLastBal=prevMeta.outLastBal||0, inLastBal=prevMeta.inLastBal||0;
+  let outGasugumIn=0, gasugumIn=0;
+
+  txns.forEach(t=>{
+    if(!t.isIncome){
+      // 출금계좌
+      if(t.out>0){
+        const cat=t.cat||'기타사용';
+        summary[cat]=(summary[cat]||0)+t.out;
+        if(cat!=='계좌간대체') expenseTotalOut+=t.out;
+      }
+      if(t.inp>0&&t.cat==='가수금입금'){
+        totalIn+=t.inp; outGasugumIn+=t.inp;
+        summary['가수금입금']=(summary['가수금입금']||0)+t.inp;
+      }
+      if(t.bal) outLastBal=Math.max(outLastBal, t.bal);
+    } else {
+      // 입금계좌
+      if(t.inp>0&&t.cat!=='계좌간대체') totalIn+=t.inp;
+      if(t.inp>0&&t.cat==='가수금입금') gasugumIn+=t.inp;
+      if(t.out>0){
+        const cat=t.cat||'기타사용';
+        if(cat!=='계좌간대체'){
+          summary[cat]=(summary[cat]||0)+t.out;
+          incomeTotalOut+=t.out;
+        }
+      }
+      if(t.bal) inLastBal=Math.max(inLastBal, t.bal);
+    }
+  });
+  gasugumIn+=outGasugumIn;
+  const totalOut=expenseTotalOut+incomeTotalOut;
+  const lastBal=outLastBal+inLastBal;
+  const monthData=Object.assign({},summary,{_meta:{totalOut,expenseTotalOut,incomeTotalOut,totalIn,gasugumIn,lastBal,outLastBal,inLastBal,savedAt:new Date().toISOString()}});
+  await setDoc(doc(fsDB,'monthly',mk),monthData);
+  DB.monthly[mk]=monthData;
+}
 
 // ============================================================
 // HELPERS
@@ -791,7 +1003,7 @@ function parseStatement(rows, isIncome, sheetMonth=null){
         else if(normalizeStr(sender).includes('황효건')||normalizeStr(memo).includes('황효건')) cat='가수금입금';
         else cat='수입';
       } else {
-        // 입금계좌 출금: 일반 매칭 규칙 적용
+        // 입금계좌 출금: 일반 매칭 그대로 (와이제이투→계좌간대체 유지 - 내부이체)
         cat=matchCategory(memo,sender);
       }
     } else {
@@ -802,7 +1014,9 @@ function parseStatement(rows, isIncome, sheetMonth=null){
         if(matched==='가수금'||isHwang) cat='가수금입금';
         else cat='계좌간대체';
       } else {
-        cat=matchCategory(memo,sender);
+        // 출금계좌 출금: 계좌간대체 차단 (실제 지출 - 외부로 나가는 돈)
+        const matched=matchCategory(memo,sender);
+        cat=(matched==='계좌간대체')?null:matched;
       }
     }
     const rawDate=String(r[iDate]);
@@ -1228,59 +1442,55 @@ async function saveMonth(){
   const key=`${year}-${String(month).padStart(2,'0')}`;
 
   const summary={};
-  let totalOut=0, totalIn=0, outLastBal=0, inLastBal=0;
-  // 수정 후 저장 시 inTxns가 비어있으면 기존 저장된 입금계좌 데이터 보존
+  let expenseTotalOut=0, incomeTotalOut=0, totalIn=0, outLastBal=0, inLastBal=0;
   const prevMetaForSave=(DB.monthly[key]&&DB.monthly[key]._meta)||{};
   let outGasugumIn=0;
   txns.forEach(t=>{
     if(t.out>0){
       const cat=t.cat||'기타사용';
       summary[cat]=(summary[cat]||0)+t.out;
-      if(cat!=='계좌간대체') totalOut+=t.out;
+      if(cat!=='계좌간대체') expenseTotalOut+=t.out;
     }
-    // 출금계좌로 황효건이 입금한 경우 = 가수금입금
     if(t.inp>0&&t.cat==='가수금입금'){
-      totalIn+=t.inp;
-      outGasugumIn+=t.inp;
+      totalIn+=t.inp; outGasugumIn+=t.inp;
       summary['가수금입금']=(summary['가수금입금']||0)+t.inp;
     }
     if(t.bal)outLastBal=t.bal;
   });
   let gasugumIn=outGasugumIn;
   inTxns.forEach(t=>{
-    if(t.inp>0&&t.cat!=='계좌간대체') totalIn+=t.inp; // 계좌간대체 수신 제외
+    if(t.inp>0&&t.cat!=='계좌간대체') totalIn+=t.inp;
     if(t.inp>0&&t.cat==='가수금입금') gasugumIn+=t.inp;
     if(t.out>0){
       const cat=t.cat||'기타사용';
       if(cat!=='계좌간대체'){
         summary[cat]=(summary[cat]||0)+t.out;
-        totalOut+=t.out;
+        incomeTotalOut+=t.out;
+        // 디버그: 입금계좌 출금 내역
+        console.log(`[입금계좌 출금] ${t.date} | ${t.memo} | cat=${cat} | ${t.out.toLocaleString()}원`);
       }
     }
     if(t.bal)inLastBal=t.bal;
   });
-  // inTxns가 비어있으면(출금파일만 업로드) 기존 입금계좌 값 보존
+  console.log(`[saveMonth] expenseTotalOut=${expenseTotalOut.toLocaleString()} incomeTotalOut=${incomeTotalOut.toLocaleString()} inTxns.length=${inTxns.length}`);
+  // 출금파일만 업로드: 이전 입금계좌 데이터 보존
   if(inTxns.length===0){
     inLastBal=prevMetaForSave.inLastBal||0;
+    incomeTotalOut=prevMetaForSave.incomeTotalOut||0;
     const prevIncomePortion=(prevMetaForSave.totalIn||0)-(prevMetaForSave.gasugumIn||0);
     totalIn=prevIncomePortion+outGasugumIn;
     gasugumIn=outGasugumIn>0?outGasugumIn:(prevMetaForSave.gasugumIn||0);
-    // 이전 입금계좌 summary 항목 보존 (수강료환불 등)
+    // 이전 입금계좌 summary 항목 보존
     const prevData=DB.monthly[key]||{};
     Object.entries(prevData).forEach(([k,v])=>{
       if(k.startsWith('_')||!v||typeof v!=='number')return;
-      // 입금계좌에서 나온 항목: allCats에 있고 outTxns에서 안 나온 것
-      const inCats=inTxns.map(t=>t.cat).filter(Boolean);
-      const outCatKeys=Object.keys(summary);
-      if(!outCatKeys.includes(k)&&!inCats.includes(k)){
-        summary[k]=(summary[k]||0);// 유지(outTxns에서 없는 건 건드리지 않음)
-      }
+      if(!Object.keys(summary).includes(k)) summary[k]=v;
     });
   }
-  // txns가 비어있으면(입금파일만 업로드) 기존 출금계좌 값 보존
+  // 입금파일만 업로드: 이전 출금계좌 데이터 보존
   if(txns.length===0){
     outLastBal=prevMetaForSave.outLastBal||0;
-    totalOut=(prevMetaForSave.totalOut||0);
+    expenseTotalOut=prevMetaForSave.expenseTotalOut||prevMetaForSave.totalOut||0;
     outGasugumIn=prevMetaForSave.gasugumIn||0;
     gasugumIn=outGasugumIn+gasugumIn;
     totalIn+=outGasugumIn;
@@ -1291,10 +1501,12 @@ async function saveMonth(){
       if(!summary[k]) summary[k]=v;
     });
   }
+  const totalOut=expenseTotalOut+incomeTotalOut;
   const lastBal=outLastBal+inLastBal;
-  const monthData=Object.assign({},summary,{_meta:{totalOut,totalIn,gasugumIn,lastBal,outLastBal,inLastBal,savedAt:new Date().toISOString()}});
+  const monthData=Object.assign({},summary,{_meta:{totalOut,expenseTotalOut,incomeTotalOut,totalIn,gasugumIn,lastBal,outLastBal,inLastBal,savedAt:new Date().toISOString()}});
   showLoading('저장 중...');
-  await saveDB(key, monthData, txns);
+  const allTxns=[...txns,...inTxns]; // 출금+입금 합산
+  await saveDB(key, monthData, allTxns);
   hideLoading();
   refreshSavedMonths();
   alert(`✅ ${key} 저장 완료`);
@@ -1535,20 +1747,25 @@ function renderMonthly(){
     if(!val)return;
     if(g!==lastGroup){
       const groupSum=allCats().filter(c=>groupOf(c)===g).reduce((s,c)=>s+(data[c]||0),0);
+      // 당월 값 있는 하위항목 수
+      const visibleCatCount=allCats().filter(c=>groupOf(c)===g&&c!=='가수금입금'&&(rawData[c]||0)>0).length;
       const gid='grp-'+groupIdx++;
       const tr=document.createElement('tr');
       tr.className='cat-group';
-      tr.style.cursor='pointer';
       tr.setAttribute('data-gid',gid);
-      tr.onclick=function(){
-        const rows=tbody.querySelectorAll('[data-group="'+gid+'"]');
-        const isOpen=this.getAttribute('data-open')!=='0';
-        rows.forEach(r=>r.style.display=isOpen?'none':'');
-        this.querySelector('.toggle-icon').textContent=isOpen?'▶':'▼';
-        this.setAttribute('data-open',isOpen?'0':'1');
-      };
-      tr.innerHTML=`<td colspan="2"><span class="toggle-icon" style="margin-right:6px;font-size:10px">▼</span><b>${g}</b></td><td class="amount" style="text-align:right">${fmt(groupSum)}</td><td style="text-align:right">${pct(groupSum,totalOut)}</td><td></td>`;
       tr.setAttribute('data-open','1');
+      if(visibleCatCount>1){
+        tr.style.cursor='pointer';
+        tr.onclick=function(){
+          const rows=tbody.querySelectorAll('[data-group="'+gid+'"]');
+          const isOpen=this.getAttribute('data-open')!=='0';
+          rows.forEach(r=>r.style.display=isOpen?'none':'');
+          this.querySelector('.toggle-icon').textContent=isOpen?'▶':'▼';
+          this.setAttribute('data-open',isOpen?'0':'1');
+        };
+      }
+      const arrowHtml=visibleCatCount>1?`<span class="toggle-icon" style="margin-right:6px;font-size:10px">▼</span>`:'';
+      tr.innerHTML=`<td colspan="2">${arrowHtml}<b>${g}</b></td><td class="amount" style="text-align:right">${fmt(groupSum)}</td><td style="text-align:right">${pct(groupSum,totalOut)}</td><td></td>`;
       tbody.appendChild(tr);
       lastGroup=g;
     }
@@ -1897,13 +2114,29 @@ function renderAnnual(){
     if(g!==lastGrp){
       const grpTotals=months.map((_,i)=>monthData[i]?(DB.groups[g]||[]).reduce((s,c)=>s+(monthData[i][c]||0),0):null);
       const grpTotal=grpTotals.reduce((s,v)=>s+(v||0),0);
+      const annGid='ag-'+g.replace(/[^a-z0-9]/gi,'_');
+      const grpCatCnt=(DB.groups[g]||[]).length;
       const tr=document.createElement('tr');
       tr.className='cat-group';
-      tr.innerHTML=`<td colspan="2" style="position:sticky;left:0;z-index:1;background:var(--card);box-shadow:2px 0 4px rgba(0,0,0,.08);white-space:nowrap"><b>${g}</b></td>${grpTotals.map(v=>`<td class="amount" style="white-space:nowrap">${v?fmtMan(v):'-'}</td>`).join('')}<td class="amount" style="white-space:nowrap">${fmt(grpTotal)}</td><td class="amount" style="white-space:nowrap">${grpTotal?fmt(grpTotal/validTotals.length):'-'}</td>`;
+      if(grpCatCnt>1){
+        tr.style.cursor='pointer';
+        tr.setAttribute('data-agid',annGid);
+        tr.setAttribute('data-open','true');
+        tr.onclick=function(){
+          const open=this.getAttribute('data-open')!=='false';
+          this.setAttribute('data-open',open?'false':'true');
+          document.querySelectorAll(`[data-aparent="${annGid}"]`).forEach(r=>r.style.display=open?'none':'');
+          const arr=this.querySelector('.ag-arrow');
+          if(arr)arr.textContent=open?'▶':'▼';
+        };
+      }
+      const arrowHtml=grpCatCnt>1?`<span class="ag-arrow" style="margin-right:4px;font-size:10px">▼</span>`:'';
+      tr.innerHTML=`<td colspan="2" style="position:sticky;left:0;z-index:1;background:var(--card);box-shadow:2px 0 4px rgba(0,0,0,.08);white-space:nowrap">${arrowHtml}<b>${g}</b></td>${grpTotals.map(v=>`<td class="amount" style="white-space:nowrap">${v?fmtMan(v):'-'}</td>`).join('')}<td class="amount" style="white-space:nowrap">${fmt(grpTotal)}</td><td class="amount" style="white-space:nowrap">${grpTotal?fmt(grpTotal/validTotals.length):'-'}</td>`;
       tbody.appendChild(tr);
       lastGrp=g;
     }
     const tr=document.createElement('tr');
+    tr.setAttribute('data-aparent','ag-'+g.replace(/[^a-z0-9]/gi,'_'));
     const nonNull=mVals.filter(v=>v!==null&&v>0);
     const grpCatCount=(DB.groups[g]||[]).length;
     // 카테고리가 1개뿐인 그룹은 항목행 생략 (그룹행과 중복)
@@ -1972,7 +2205,7 @@ async function addGroup(){
 }
 
 function renderSettings(){
-  // 계좌번호 설정 로드
+  // 계좌번호 설정 로드 (DB.config에서 우선, 없으면 Firestore 직접)
   const incomeAcct=DB.config?.incomeAccount||'';
   const expenseAcct=DB.config?.expenseAccount||'';
   const iEl=document.getElementById('income-acct-input');
@@ -1980,10 +2213,8 @@ function renderSettings(){
   if(iEl) iEl.value=incomeAcct;
   if(eEl) eEl.value=expenseAcct;
   const status=document.getElementById('acct-config-status');
-  if(status){
-    if(incomeAcct||expenseAcct)
-      status.textContent=`현재 설정: 입금계좌 ${incomeAcct||'미설정'} / 출금계좌 ${expenseAcct||'미설정'}`;
-  }
+  if(status&&(incomeAcct||expenseAcct))
+    status.textContent=`현재 설정: 입금계좌 ${incomeAcct||'미설정'} / 출금계좌 ${expenseAcct||'미설정'}`;
   const el=document.getElementById('keyword-by-group');
   if(!el)return;
 
@@ -2426,6 +2657,15 @@ function showTab(name, btn){
   if(activeBtn)activeBtn.classList.add('active');
   sessionStorage.setItem('activeTab', name);
 
+  if(name==='txnlist'){
+    // 최신 저장 월로 자동 설정
+    const keys=Object.keys(DB.monthly).sort().reverse();
+    if(keys.length){
+      const[y,m]=keys[0].split('-');
+      document.getElementById('txn-year').value=y;
+      document.getElementById('txn-month').value=m;
+    }
+  }
   if(name==='monthly'){
     // 탭이 보이는 상태에서 값 설정 (hidden 상태에서 value 설정 안 되는 브라우저 이슈 해결)
     const keys=Object.keys(DB.monthly).sort().reverse();
@@ -2458,6 +2698,9 @@ window.saveModalChanges = saveModalChanges;
 window.changeModalCat = changeModalCat;
 window.changeModalGroup = changeModalGroup;
 window.addGroup = addGroup;
+window.loadTxnList = loadTxnList;
+window.markTxnChange = markTxnChange;
+window.saveTxnChanges = saveTxnChanges;
 window.saveAccountConfig = saveAccountConfig;
 async function saveAccountConfig(){
   const incomeAcct=document.getElementById('income-acct-input').value.trim();
